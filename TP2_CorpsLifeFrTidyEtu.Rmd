@@ -1,0 +1,125 @@
+---
+title: "TP 2 - Codification et visualisation - Approach Tidy"
+output:
+  pdf_document:
+    toc: yes
+    dev: tikz
+    number_section: yes
+    keep_tex: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_section: yes
+    theme: cosmo
+    highlight: haddock
+    number_sections: yes
+---
+
+```{r setup, echo = FALSE,message = FALSE,warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height = 2, fig.width = 3,
+                      fig.align = 'center',
+                      sanitize=TRUE,
+                      warning=FALSE,
+                      message=FALSE)
+library(knitr)# pour kable
+library(kableExtra)# pour améliorer la présentation des tableaux
+
+options(tikzSanitizeCharacters = c("%", "^",  "&", "~", "é", "É", "è", "È", "à", "À","ê",'_'),
+        tikzReplacementCharacters = c("\\%","\\^{}","\\&", "\\char`\\~", "\\'e", "\\'E", "\\`e", "\\`E", "\\`a","\\`A","\\^e","\\_{}")
+        )
+```
+
+# Construction du data.frame
+
+Comme dans le TP précédent les données sont importées puis réordonnées. Attention l'objet **data** est un tibble. Il s'agit d'un nouveau type de data frame. Cela fonctionne avec tous les packages du type **tidy** qui sont rassemblés dans le package **tidyverse*}**.
+Le package **tidytext** nous permet d'effectuer de l'analyse textuelle.
+
+```{r}
+library(tidyverse)
+library(tidytext)
+
+```
+```{r JeuDeDonnees}
+data <- read_csv2("Data/Aspiration_Int_Fr.csv",
+                  locale = locale(encoding="ISO-8859-1"))
+colnames(data)[1] <- "Id"
+
+```
+```{r}
+table(data$Age_en_Classes)
+```
+
+```{r}
+data$Age_en_Classes <- fct_relevel(data$Age_en_Classes, ">70", after=11)
+data$Sexe_Age <- as.factor(data$Sexe_Age)
+data$Sexe_Age |>  fct_relevel("F>55", after =2) |>  fct_relevel("H>55", after = 5)
+```
+# Étude du nombre d'occurences de l'ensemble de la population
+Déterminons la liste des mots et leur occurence pour la première question.
+```{r}
+MotsQ1 <- data |> select(Important) |> unnest_tokens(output = Mots,
+                                                     input= Important,
+                                                     token = "words")
+head(MotsQ1)
+```
+
+
+Ici la commande pourra se dire oralement ainsi \og de \texttt{data} on extrait la colonne Important que l'on sépare mot à mot.\fg \\
+La commande suivante permet de regrouper par mots et de déterminer l'effectif ou fréquence de chacun des mots.
+```{r}
+MotsQ1 <- MotsQ1 |> group_by(Mots) |> summarize(Freq=n())
+MotsQ1 |> arrange(desc(Freq)) |> slice(1:10)
+```
+Regardons les 10 premiers :
+```{r}
+
+```
+Cette commande se lit : \og dans le tibble \texttt{MotsQ1} on récupère les 10 lignes qui ont la plus forte fréquence, puis on les range dans l'ordre décroissant des fréquences, et on n'affiche que les mots. \fg
+On peut repérer que certains mots sont à supprimer : la, une, mes, et\dots.
+On utilise pour cela le package \texttt{stopwords}. De plus on ne va conserver que ceux qui une fréquence supérieure ou égale à 20.
+
+```{r}
+library(stopwords)
+```
+
+```{r}
+
+MotsQ1F <- MotsQ1 |> anti_join(get_stopwords("fr"), by =c("Mots" = "word")) |> filter(Freq >=20)
+
+```
+
+Un graphique joli\dots où la taille de la police dépend de l'effectif\dots
+```{r GraphJoli,sanitize=T,fig.env='figure',fig.cap='un joli dessin avec de grandes marges...',fig.pos='H'}
+library(wordcloud)
+MotsQ1F %>% {wordcloud(.[["Mots"]],.[["Freq"]],color=brewer.pal(8,"Accent"),
+                     random.over = FALSE,
+                     scale=c(8,0.5))}
+
+```
+Et maintenant le code pour un graphique utile. 
+```{r GraphUtile,fig.env='figure',fig.height=3,fig.width=3,fig.pos='H',fig.cap='Fréquences des mots les plus cités'}
+
+MotsQ1F |> ggplot(aes(x=reorder(Mots,Freq),y =Freq)) + 
+  geom_bar(stat = "identity")
+
+```
+
+On peut aussi tracer le diagramme de Pareto de la gamme des fréquences.
+```{r Pareto2,fig.env='figure',fig.cap='Diagramme de Pareto de la gamme des fréquences',fig.height=2.5,fig.width=2.5,fig.pos='H',sanitize=T}
+
+```
+
+# Étude du nombre d'occurences en fonction du sexe et de l'âge
+Déterminons le tableau lexical en fonction de l'âge et du sexe. 
+
+```{r}
+
+
+```
+Puis effectuons le graphique qui représentera les plus fortes occurences par âge et sexe. Une petite différence est à observer pour obtenir un graphique avec les mots dans l'ordre décroissant "globalement". On modifie aussi le nombre d'occurrence minimale pour que chaque catégorie soit bien représentée.
+
+```{r, echo=FALSE}
+
+
+```

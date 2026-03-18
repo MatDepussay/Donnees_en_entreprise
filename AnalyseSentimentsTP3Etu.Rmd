@@ -1,0 +1,210 @@
+---
+title: 'TP 3 : Analyse des sentiment Approach Tidy'
+output:
+  pdf_document:
+    toc: yes
+    dev: tikz
+    number_section: yes
+    keep_tex: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_section: yes
+    theme: cosmo
+    highlight: haddock
+    number_sections: yes
+---
+
+```{r setup, echo = FALSE,message = FALSE,warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height = 4, fig.width = 4,
+                      fig.align = 'center',
+                      sanitize=TRUE,
+                      warning=FALSE,
+                      message=FALSE)
+library(knitr)# pour kable
+library(kableExtra)# pour améliorer la présentation des tableaux
+
+options(tikzSanitizeCharacters = c("%", "^",  "&", "~", "é", "É", "è", "È", "à", "À","ê","_"),
+        tikzReplacementCharacters = c("\\%","\\^{}","\\&", "\\char`\\~", "\\'e", "\\'E", "\\`e", "\\`E", "\\`a","\\`A","\\^e","\\_{}")
+        )
+```
+
+
+
+
+Ce script reprend celui du livre *Text Mining with R a tidy approach*.
+
+# Chargement des données et packages - Présentation des packages
+
+**tidytext** est le package qui permet d'effectuer l'analyse de données textuelles avec des tibbles. Il contient 3 dictionnaires (anglais) qui permettent de faire de l'analyse de sentiments.
+Le package **janeaustenr** contient 6 nouvelles d'une auteure anglaise.
+
+```{r}
+
+
+```
+
+Le package **textdata** contient plusieurs lexiques différents. Nous allons nous servir des 3 suivants : 
+
+ - **afinn :** un score positif ou négatif est attribué à chaque mot du lexique.
+ - **bing :** chaque mot est catalogué en positif ou négatif.
+ - **nrc :** un sentiment (colère, joie...) est attribué à chaque mot (10 catégories)
+
+```{r}
+
+
+```
+
+# Chargement de la base de données textuelles.
+
+Pour travailler sur ces textes, il faut préparer la base de données.
+
+**austen_books** contient deux colonnes intitulées 
+
+ - `text` qui contient les lignes du livre (1 ligne par ligne) 
+ - `book` qui spécifie le livre. 
+
+```{r}
+austen_books()
+```
+
+Nous allons créer une base de données qui séparera en mots et  précisera le livre le chapitre et le numéro de la ligne. 
+On crée :
+
+ - une variable **linenumber** pour déterminer le numéro de ligne dans le livre avec la commande **row_number()**. 
+ - Pour repérer les chapitres on repère les lignes contenant une chaine de caractères débutant par **chapter** un espace un nombre digital ou romain. 
+ - En cumulant les valeurs logiques obtenues on obtient les chapitres auquel appartient chaque ligne du texte, puis on dégroupe les livres et on découpe les lignes en mots.
+
+```{r}
+
+
+
+```
+
+Ce travail de découpage par chapitre n'est pas nécessaire pour la suite, mais c'est un bon exemple de détection de chaîne de caractère... ce qui est utile dans l'analyse textuelle.
+
+
+# Etude avec le lexique nrc
+Nous allons sélectionner les mots de la catégorie joy du lexique nrc :
+
+```{r}
+nrc_joy<-get_sentiments("nrc") %>% filter(sentiment =="joy")
+```
+
+Recherchons les mots les plus fréquents de la catégorie joy dans le livre Emma. La commande **inner_join** permet  de joindre les tableaux en prenant toutes les lignes de **tidybook** ayant une concordance avec une ligne de **nrc_joy**.
+
+```{r}
+
+
+
+```
+
+
+# Etude avec le lexique bing
+
+
+```{r}
+
+
+
+```
+Regardons ce code :
+
+
+#. Depuis **tidy_books**, on accole le sentiment à chaque mot qui est contenu dans le lexique bing.
+#. Dans chaque livre, on regroupe les lignes par paquet de 80 (en créant la variable index), on compte les différents sentiments (ici positif et négatif).
+#. On transforme le tableau au niveau des colonnes sentiment et effectif n, en créant des colonnes correspondant aux modalités de la variable sentiment en donnant l'effectif correspondant.
+#. Puis on crée la nouvelle variable sentiment qui sera la différence entre les scores.
+
+Effectuons la représentation graphique des sentiments selon les livres par paquets de 20 lignes.
+```{r, fig.width=7,fig.height=7}
+ggplot(jane_austen_sentiment, aes(index, sentiment, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~book, ncol = 2, scales = "free_x")
+```
+
+
+# Détermination des mots positifs et négatifs les plus citées.
+Nous allons travailler avec l'ensemble de l’oeuvre et déterminer les mots du lexique bing positif ou négatif et compter leur occurrence.
+
+```{r}
+
+
+
+```
+
+Effectuons la représentation graphique des 10 mots positifs ou négatifs les plus fréquents.
+
+```{r, fig.height=2.5,fig.width=7}
+
+
+```
+
+Le mot **miss** dans ces livres est associé à un nom propre, et ne correspond pas au verbe. Il faudra étudier les segments de deux mots. Nous allons supprimer ce mot en créant un nouvelle base de mots à supprimer, comme au TP précédent.
+
+```{r}
+
+
+
+```
+
+**poor** est maintenant le mot négatif le plus commun.
+
+# Comparaison des 3 lexiques de sentiments.
+
+Nous allons comparer les résultats des 3 lexiques pour le livre "pride et prejudice".
+
+```{r}
+
+
+
+```
+
+Nous allons d'abord travailler avec le lexique **AFINN** qui donne un score + ou - aux mots, en adaptant la même méthodologie, mais ici en comptant les scores et non le nombre d’occurrence :
+
+```{r}
+
+
+```
+
+ Nous allons construire, dans un premier temps un tableau contenant les mots du livre associés au sentiment positif et négatif des deux méthodes **bing** et **nrc** en distinguant les deux. Puis nous déterminerons comme précédemment un score de sentiment.
+ 
+```{r}
+
+
+
+```
+
+Ensuite on assemble les deux tableaux et on peut affectuer la représentation graphique en comparant les méthodes.
+
+
+```{r, fig.height=6,fig.width=6}
+
+
+```
+
+Les différences peuvent s'expliquer aussi par les lexiques :
+
+```{r}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

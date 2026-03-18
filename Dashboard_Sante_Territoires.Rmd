@@ -1,0 +1,409 @@
+---
+title: "Dashboard Sante et Territoires"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+required_packages <- c(
+  "flexdashboard", "tidyverse", "tidytext", "wordcloud2", "leaflet",
+  "sf", "DT", "plotly", "stopwords", "scales", "htmltools", "stringi"
+)
+
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_packages) > 0) {
+  stop(
+    paste0(
+      "Packages manquants: ", paste(missing_packages, collapse = ", "),
+      ". Installe-les avec install.packages()."
+    )
+  )
+}
+
+library(flexdashboard)
+library(shiny)
+library(tidyverse)
+library(tidytext)
+library(wordcloud2)
+library(leaflet)
+library(sf)
+library(DT)
+library(plotly)
+library(stopwords)
+library(scales)
+library(htmltools)
+library(stringi)
+
+read_finess <- function(path) {
+  readr::read_delim(
+    file = path,
+    delim = ";",
+    col_types = readr::cols(.default = readr::col_character()),
+    trim_ws = TRUE,
+    locale = readr::locale(encoding = "Latin1"),
+    show_col_types = FALSE,
+    progress = FALSE
+  )
+}
+
+normalize_token <- function(x) {
+  x |>
+    stringi::stri_trans_general("Latin-ASCII") |>
+    stringr::str_to_lower()
+}
+
+etab_raw <- read_finess("Data/finess_etablissements.csv") |>
+  transmute(
+    nofinesset,
+    rs,
+    rslongue,
+    departement = coalesce(na_if(departement, ""), "NC"),
+    libdepartement = coalesce(na_if(libdepartement, ""), "Non renseigne"),
+    coordxet = readr::parse_double(coordxet, locale = readr::locale(decimal_mark = ".")),
+    coordyet = readr::parse_double(coordyet, locale = readr::locale(decimal_mark = "."))
+  )
+
+activites <- read_finess("Data/finess_activites_soin.csv") |>
+  transmute(nofinesset, libactivite)
+
+disciplines <- read_finess("Data/finess_disciplines_enseignement.csv") |>
+  transmute(nofinesset, libde)
+
+materiels <- read_finess("Data/finess_materiels_lourds.csv") |>
+  transmute(nofinesset, libeml)
+
+etab <- etab_raw |>
+  filter(!is.na(rs), rs != "")
+
+etab_meta <- etab |>
+  select(nofinesset, departement, libdepartement)
+
+# Dictionnaire de stop words FR + mots metier peu discriminants pour l'analyse thematique.
+stop_fr <- tibble(token_norm = normalize_token(stopwords::stopwords("fr", source = "snowball")))
+stop_custom <- tibble(
+  token_norm = c(
+    "centre", "centres", "etablissement", "etablissements", "site", "hopital",
+    "hospitalier", "hospitaliere", "hospitalieres", "hospitaliers", "clinique",
+    "groupement", "pole", "poles", "service", "services", "unite", "unites",
+    "maison", "sante", "institut", "association", "residence", "foyer", "de",
+    "du", "des", "d", "l", "le", "la", "les", "aux", "sur", "chez", "en"
+  )
+)
+stop_all <- bind_rows(stop_fr, stop_custom) |> distinct()
+
+etab_text <- etab |>
+  mutate(
+    text_clean = rs |>
+      str_replace_all("['’]", " ") |>
+      str_replace_all("[^[:alnum:] ]", " ")
+  )
+
+tokens <- etab_text |>
+  select(nofinesset, departement, libdepartement, text_clean) |>
+  unnest_tokens(output = token, input = text_clean, token = "words") |>
+  mutate(token_norm = normalize_token(token)) |>
+  filter(
+    str_detect(token_norm, "[a-z]"),
+    str_length(token_norm) > 2
+  ) |>
+  anti_join(stop_all, by = "token_norm")
+
+bigrams <- etab_text |>
+  select(nofinesset, departement, libdepartement, text_clean) |>
+  unnest_tokens(output = bigram, input = text_clean, token = "ngrams", n = 2) |>
+  separate(bigram, into = c("w1", "w2"), sep = " ", remove = FALSE) |>
+  mutate(
+    w1 = normalize_token(w1),
+    w2 = normalize_token(w2),
+    bigram = paste(w1, w2)
+  ) |>
+  filter(
+    !is.na(w1), !is.na(w2),
+    str_detect(w1, "[a-z]"), str_detect(w2, "[a-z]"),
+    str_length(w1) > 2, str_length(w2) > 2
+  ) |>
+  anti_join(stop_all |> rename(w1 = token_norm), by = "w1") |>
+  anti_join(stop_all |> rename(w2 = token_norm), by = "w2")
+
+top_themes_dep <- tokens |>
+  count(departement, token_norm, sort = TRUE, name = "n") |>
+  group_by(departement) |>
+  slice_max(order_by = n, n = 8, with_ties = FALSE) |>
+  summarise(
+    top_themes = paste0(token_norm, " (", n, ")", collapse = ", "),
+    .groups = "drop"
+  )
+
+dep_stats <- etab_meta |>
+  count(departement, name = "n_etab") |>
+  left_join(top_themes_dep, by = "departement") |>
+  mutate(top_themes = replace_na(top_themes, "Pas de themes detectes"))
+
+dep_geo <- sf::st_read("Data/departements.geojson", quiet = TRUE) |>
+  mutate(
+    departement = stringr::str_to_upper(as.character(code)),
+    libdepartement_geo = as.character(nom)
+  ) |>
+  st_transform(4326) |>
+  left_join(dep_stats, by = "departement") |>
+  mutate(
+    n_etab = replace_na(n_etab, 0L),
+    top_themes = replace_na(top_themes, "Pas de themes detectes"),
+    libdepartement = coalesce(libdepartement_geo, departement)
+  )
+
+dep_choices_tbl <- dep_geo |>
+  st_drop_geometry() |>
+  filter(n_etab > 0) |>
+  distinct(departement, libdepartement) |>
+  arrange(departement) |>
+  mutate(label = paste0(departement, " - ", libdepartement))
+
+dep_choices <- c("Tous" = "Tous", setNames(dep_choices_tbl$departement, dep_choices_tbl$label))
+```
+
+```{css}
+.sidebar {
+  overflow-y: auto;
+}
+
+.section.sidebar h3 {
+  margin-top: 0.4em;
+}
+
+.leaflet-container {
+  min-height: 460px;
+}
+
+.plotly html-widget,
+.html-widget {
+  width: 100% !important;
+}
+```
+
+Column {.sidebar data-width=300}
+-----------------------------------------------------------------------
+
+### Filtres
+
+```{r}
+selectInput(
+  inputId = "dep_select",
+  label = "Selection du departement",
+  choices = dep_choices,
+  selected = "Tous",
+  selectize = TRUE
+)
+
+sliderInput(
+  inputId = "top_n",
+  label = "Nombre de termes / bigrammes affiches",
+  min = 10,
+  max = 80,
+  value = 30,
+  step = 5
+)
+```
+
+### Lecture de l'axe
+
+```{r}
+HTML(
+  "<b>Axe d'etude :</b> specialisation des territoires via la semantique des noms d'etablissements.<br>
+  <b>Principe :</b> on nettoie les noms (tokenisation + stop words), puis on compare les themes dominants par departement."
+)
+```
+
+### Indicateurs
+
+```{r}
+renderValueBox({
+  filtered_etab <- if (input$dep_select == "Tous") {
+    etab_meta
+  } else {
+    etab_meta |> filter(departement == input$dep_select)
+  }
+
+  n <- nrow(filtered_etab)
+  valueBox(
+    value = format(n, big.mark = " "),
+    caption = "Etablissements",
+    icon = "fa-hospital",
+    color = "primary"
+  )
+})
+```
+
+```{r}
+renderValueBox({
+  filtered_etab <- if (input$dep_select == "Tous") {
+    etab_meta
+  } else {
+    etab_meta |> filter(departement == input$dep_select)
+  }
+
+  ids <- filtered_etab$nofinesset
+  n <- activites |> filter(nofinesset %in% ids) |> nrow()
+  valueBox(
+    value = format(n, big.mark = " "),
+    caption = "Lignes d'activites de soin",
+    icon = "fa-stethoscope",
+    color = "success"
+  )
+})
+```
+
+```{r}
+renderValueBox({
+  filtered_etab <- if (input$dep_select == "Tous") {
+    etab_meta
+  } else {
+    etab_meta |> filter(departement == input$dep_select)
+  }
+
+  ids <- filtered_etab$nofinesset
+  n_de <- disciplines |> filter(nofinesset %in% ids) |> nrow()
+  n_eml <- materiels |> filter(nofinesset %in% ids) |> nrow()
+  valueBox(
+    value = paste0(format(n_de, big.mark = " "), " / ", format(n_eml, big.mark = " ")),
+    caption = "Disciplines / Materiels lourds",
+    icon = "fa-cogs",
+    color = "warning"
+  )
+})
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Nuage de mots interactif
+
+```{r}
+renderWordcloud2({
+  filtered_tokens <- if (input$dep_select == "Tous") {
+    tokens
+  } else {
+    tokens |> filter(departement == input$dep_select)
+  }
+
+  wc <- filtered_tokens |>
+    count(token_norm, sort = TRUE) |>
+    slice_head(n = input$top_n) |>
+    rename(word = token_norm, freq = n)
+
+  validate(need(nrow(wc) > 0, "Aucun terme disponible pour ce filtre."))
+
+  wordcloud2(
+    data = wc,
+    size = 0.7,
+    minSize = 6,
+    rotateRatio = 0.2,
+    color = "random-dark",
+    backgroundColor = "#f7f9fb"
+  )
+})
+```
+
+### Bigrammes dominants
+
+```{r}
+renderPlotly({
+  filtered_bigrams <- if (input$dep_select == "Tous") {
+    bigrams
+  } else {
+    bigrams |> filter(departement == input$dep_select)
+  }
+
+  df <- filtered_bigrams |>
+    count(bigram, sort = TRUE) |>
+    slice_head(n = input$top_n) |>
+    mutate(bigram = forcats::fct_reorder(bigram, n))
+
+  validate(need(nrow(df) > 0, "Aucun bigramme disponible pour ce filtre."))
+
+  p <- ggplot(df, aes(x = bigram, y = n)) +
+    geom_col(fill = "#2a9d8f") +
+    coord_flip() +
+    labs(x = NULL, y = "Occurrences", title = "Bigrammes les plus frequents") +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = c("x", "y"))
+})
+```
+
+### Table de synthese textuelle
+
+```{r}
+renderDT({
+  filtered_tokens <- if (input$dep_select == "Tous") {
+    tokens
+  } else {
+    tokens |> filter(departement == input$dep_select)
+  }
+
+  validate(need(nrow(filtered_tokens) > 0, "Aucune donnee textuelle pour ce filtre."))
+
+  filtered_tokens |>
+    count(token_norm, sort = TRUE, name = "frequence") |>
+    slice_head(n = input$top_n) |>
+    datatable(
+      rownames = FALSE,
+      options = list(pageLength = 10, dom = "tip"),
+      colnames = c("terme", "frequence")
+    )
+})
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Carte Leaflet: volume d'etablissements et themes territoriaux
+
+```{r}
+renderLeaflet({
+  d <- if (input$dep_select == "Tous") {
+    dep_geo
+  } else {
+    dep_geo |> filter(departement == input$dep_select)
+  }
+
+  validate(need(nrow(d) > 0, "Aucune geometrie disponible pour ce departement."))
+
+  pal <- colorBin(
+    palette = "YlOrRd",
+    domain = dep_geo$n_etab,
+    bins = 7,
+    na.color = "#f0f0f0"
+  )
+
+  leaflet(d) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    addPolygons(
+      fillColor = ~pal(n_etab),
+      weight = 1,
+      color = "#4f5d75",
+      opacity = 1,
+      fillOpacity = 0.75,
+      smoothFactor = 0.2,
+      label = ~paste0(departement, " - ", libdepartement, " : ", format(n_etab, big.mark = " "), " etablissements"),
+      popup = ~paste0(
+        "<b>", departement, " - ", libdepartement, "</b><br>",
+        "Etablissements: ", format(n_etab, big.mark = " "), "<br><br>",
+        "<b>Themes dominants:</b><br>",
+        htmltools::htmlEscape(top_themes)
+      )
+    ) |>
+    addLegend(
+      "bottomright",
+      pal = pal,
+      values = dep_geo$n_etab,
+      title = "Nombre d'etablissements",
+      opacity = 0.85
+    )
+})
+```

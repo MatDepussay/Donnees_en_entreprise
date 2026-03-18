@@ -1,0 +1,196 @@
+---
+title: "Untitled"
+author: "Fpiller"
+date: "2026-01-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height = 3, fig.width = 3,
+                      fig.align = 'center',
+                      sanitize=TRUE,
+                      warning=FALSE,
+                      message=FALSE)
+library(knitr)# pour kable
+library(kableExtra)# pour améliorer la présentation des tableaux
+```
+
+## Importation
+```{r importation}
+base_Fr<-read.csv2("Aspiration_Int_Fr.csv",sep=";",header=TRUE,row.names=1)
+head(base_Fr)
+str(base_Fr)
+```
+
+## Ordre des levels
+
+
+```{r pressure}
+base_Fr[, "Age_en_Classes"] <- ordered(
+  base_Fr[, "Age_en_Classes"],
+  levels = c(
+    "18_19",
+    "20_24",
+    "25_29",
+    "30_34",
+    "35_39",
+    "40_44",
+    "45_49",
+    "50_54",
+    "55_59",
+    "60_64",
+    "65_70",
+    ">70"
+  )
+)
+base_Fr[, "Niv_Education"] <- ordered(base_Fr[, "Niv_Education"],
+                                      levels = c("faible", "moyen", "superieur"))
+base_Fr[, "Sexe_Age"] <- ordered(base_Fr[, "Sexe_Age"],
+                                 levels = c("H<=30", "H31_55", "H>55", "F<=30",
+                                            "F31_55", "F>55"))
+base_Fr[, "Sexe_Educ"] <- ordered(
+  base_Fr[, "Sexe_Educ"],
+  levels = c(
+    "H_faible",
+    "H_moyen",
+    "H_superieur",
+    "F_faible",
+    "F_moyen",
+    "F_superieur"
+  )
+)
+base_Fr[, "Age_Educ"] <- ordered(
+  base_Fr[, "Age_Educ"],
+  levels = c(
+    "<=30_faible",
+    "<=30_moyen",
+    "<=30_superieur",
+    "31_55_faible",
+    "31_55_moyen",
+    "31_55_superieur",
+    ">55_faible",
+    ">55_moyen",
+    ">55_superieur"
+  )
+)
+base_Fr[, "Sex_Age_Edu"] <- ordered(
+  base_Fr[, "Sex_Age_Edu"],
+  levels = c(
+    "H<=30_faible",
+    "H<=30_moyen",
+    "H<=30_superieur",
+    "H31_55_faible",
+    "H31_55_moyen",
+    "H31_55_superieur",
+    "H>55_faible",
+    "H>55_moyen",
+    "H>55_superieur",
+    "F<=30_faible",
+    "F<=30_moyen",
+    "F<=30_superieur",
+    "F31_55_faible",
+    "F31_55_moyen",
+    "F31_55_superieur",
+    "F>55_faible",
+    "F>55_moyen",
+    "F>55_superieur"
+  )
+)
+save(base_Fr, file = "Aspiration_Int_Fr.RData", compress = 'xz')
+
+```
+
+# Construction du tableau lexical
+
+
+
+## Quelques graphiques
+
+## Les 10 mots les plus fréquents
+
+## Les 10 segments les plus fréquents
+
+
+```{r,fig.height=4,fig.width=4}
+tab <- table(as.factor(res.TD$indexW[, 1]))
+freq <- res.TD$indexW[, 1]
+rang <- 1:length(freq)
+par(mar = c(4, 4, 1, 1),
+    mgp = c(2.5, 0.5, 0),
+    bty = "n")
+plot(
+  x = rang,
+  y = freq,
+  las = 1,
+  log = "xy",
+  type = "o"
+)
+reg1 <- lm(log10(freq) ~ log10(rang))
+abline(reg1, col = "gray30")
+```
+Pour le graphique ci-dessous on "linéarise" pour les mots ayant la même fréquence.
+```{r,fig.height=4,fig.width=4}
+tab <- table(as.factor(res.TD$indexW[, 1]))
+freq1 <- rev(as.numeric(names(tab)))
+Nb <- rev(as.vector(tab))
+NbCum <- cumsum(Nb)
+par(mar = c(4, 4, 1, 1),
+    mgp = c(2.5, 0.5, 0),
+    bty = "n")
+plot(
+  x = NbCum ,
+  y = freq1,
+  las = 1,
+  log = "xy",
+  xlab = "Nombre de mots de fréquence au moins
+      égale a f (échelle logarithmique) ",
+  ylab = "fréquence f (échelle logarithmique)",
+  type = "o"
+)
+reg1 <- lm(log10(freq1) ~ log10(NbCum))
+abline(reg1, col = "gray30")
+lines(x = rang, y = freq, col = "orange")
+```
+
+# Construction d'un tableau lexical en vue d'une AFC
+Pour cette exemple nous choisissons de ne retenir que les mots les plus fréquents nombre d’occurrences minimale de 100 dans au moins 80 documents, puis ils sont agrégées en fonction de la variable contextuelle Sexe et Âge. La commande **TextData** crée le tableau lexical complet en sélectionner les mots ayant une fréquence minimale et appartenant à un nombre de document minimum. Les documents sont construit en fonction des variables contextuelles. Cette commande permet aussi de bloquer certain mots choisi par l'utilisateur et d'autres appartenant au package **tm** pour l'idiome Français.
+
+```{r}
+
+```
+
+Le résumé nous permet d'observer le nombre de mots et de documents retenus avant et après aggrégation avec la variable contextuelle.
+Les seuils choisis sont élevés pour ne retenir qu'un faible nombre de mots  (10 ici) pour présenter la méthode.
+On pourra reprendre l'ensemble du script en modifiant les arguments **Fmin** et **Dmin**.
+
+On obtient le tableau lexical ainsi : 
+```{r}
+
+```
+
+
+# Construction des Profils
+Les scripts suivants donne les profils lignes et colonnes en suivant le programme suivant :
+- On rajoute la somme de chaque colonne, pour avoir la distribution marginale ligne (mots)
+- On détermine le tableau des fréquences lignes.
+- On rajoute la somme des lignes (optionnel) pour vérifier que la somme fait 1.
+- On nomme les colonne et ligne ajoutées.
+- On affiche le tableau en pourcentage.
+
+```{r}
+
+```
+
+
+# Modèle d'indépendance
+On effectue un test d'indépendance du $\chi^2$ :
+
+```{r}
+
+``` 
+
+# Analyse des correspondances
+
+On peut maintenant effectuer l'analyse des correspondances en utilisant la commande **LexCA()** du package **XplorText**.
+
