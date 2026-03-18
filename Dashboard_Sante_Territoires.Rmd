@@ -2,7 +2,7 @@
 title: "Dashboard Sante et Territoires"
 output:
   flexdashboard::flex_dashboard:
-    orientation: rows
+    orientation: columns
     vertical_layout: fill
 runtime: shiny
 ---
@@ -51,6 +51,19 @@ read_finess <- function(path) {
   )
 }
 
+read_etalab_mapping <- function(path) {
+  readr::read_delim(
+    file = path,
+    delim = ";",
+    col_names = c("type_lien", "finess", "etalab", "meta"),
+    col_types = readr::cols(.default = readr::col_character()),
+    trim_ws = TRUE,
+    locale = readr::locale(encoding = "Latin1"),
+    show_col_types = FALSE,
+    progress = FALSE
+  )
+}
+
 normalize_token <- function(x) {
   x |>
     stringi::stri_trans_general("Latin-ASCII") |>
@@ -76,6 +89,11 @@ disciplines <- read_finess("Data/finess_disciplines_enseignement.csv") |>
 
 materiels <- read_finess("Data/finess_materiels_lourds.csv") |>
   transmute(nofinesset, libeml)
+
+etalab_raw <- read_etalab_mapping("Data/etalab-cs1100505-stock-20260311-0344.csv")
+etalab_map <- etalab_raw |>
+  filter(type_lien == "structureet") |>
+  transmute(nofinesset = finess, etalab)
 
 etab <- etab_raw |>
   filter(!is.na(rs), rs != "")
@@ -141,8 +159,68 @@ top_themes_dep <- tokens |>
 
 dep_stats <- etab_meta |>
   count(departement, name = "n_etab") |>
+  left_join(
+    activites |>
+      left_join(etab_meta, by = "nofinesset") |>
+      filter(!is.na(departement)) |>
+      count(departement, name = "n_act") |>
+      left_join(
+        activites |>
+          left_join(etab_meta, by = "nofinesset") |>
+          filter(!is.na(departement)) |>
+          group_by(departement) |>
+          summarise(n_act_types = n_distinct(libactivite[!is.na(libactivite) & libactivite != ""]), .groups = "drop"),
+        by = "departement"
+      ),
+    by = "departement"
+  ) |>
+  left_join(
+    disciplines |>
+      left_join(etab_meta, by = "nofinesset") |>
+      filter(!is.na(departement)) |>
+      count(departement, name = "n_de") |>
+      left_join(
+        disciplines |>
+          left_join(etab_meta, by = "nofinesset") |>
+          filter(!is.na(departement)) |>
+          group_by(departement) |>
+          summarise(n_de_types = n_distinct(libde[!is.na(libde) & libde != ""]), .groups = "drop"),
+        by = "departement"
+      ),
+    by = "departement"
+  ) |>
+  left_join(
+    materiels |>
+      left_join(etab_meta, by = "nofinesset") |>
+      filter(!is.na(departement)) |>
+      count(departement, name = "n_eml") |>
+      left_join(
+        materiels |>
+          left_join(etab_meta, by = "nofinesset") |>
+          filter(!is.na(departement)) |>
+          group_by(departement) |>
+          summarise(n_eml_types = n_distinct(libeml[!is.na(libeml) & libeml != ""]), .groups = "drop"),
+        by = "departement"
+      ),
+    by = "departement"
+  ) |>
   left_join(top_themes_dep, by = "departement") |>
-  mutate(top_themes = replace_na(top_themes, "Pas de themes detectes"))
+  mutate(
+    n_act = replace_na(n_act, 0L),
+    n_de = replace_na(n_de, 0L),
+    n_eml = replace_na(n_eml, 0L),
+    n_act_types = replace_na(n_act_types, 0L),
+    n_de_types = replace_na(n_de_types, 0L),
+    n_eml_types = replace_na(n_eml_types, 0L),
+    n_act_per_100 = if_else(n_etab > 0, 100 * n_act / n_etab, 0),
+    n_de_per_100 = if_else(n_etab > 0, 100 * n_de / n_etab, 0),
+    n_eml_per_100 = if_else(n_etab > 0, 100 * n_eml / n_etab, 0),
+    score_acces = scales::rescale(
+      0.5 * n_act_per_100 + 0.3 * n_de_per_100 + 0.2 * n_eml_per_100,
+      to = c(0, 100)
+    ),
+    top_themes = replace_na(top_themes, "Pas de themes detectes")
+  )
 
 dep_geo <- sf::st_read("Data/departements.geojson", quiet = TRUE) |>
   mutate(
@@ -153,9 +231,38 @@ dep_geo <- sf::st_read("Data/departements.geojson", quiet = TRUE) |>
   left_join(dep_stats, by = "departement") |>
   mutate(
     n_etab = replace_na(n_etab, 0L),
+    n_act = replace_na(n_act, 0L),
+    n_de = replace_na(n_de, 0L),
+    n_eml = replace_na(n_eml, 0L),
+    n_act_types = replace_na(n_act_types, 0L),
+    n_de_types = replace_na(n_de_types, 0L),
+    n_eml_types = replace_na(n_eml_types, 0L),
+    n_act_per_100 = replace_na(n_act_per_100, 0),
+    n_de_per_100 = replace_na(n_de_per_100, 0),
+    n_eml_per_100 = replace_na(n_eml_per_100, 0),
+    score_acces = replace_na(score_acces, 0),
     top_themes = replace_na(top_themes, "Pas de themes detectes"),
     libdepartement = coalesce(libdepartement_geo, departement)
   )
+
+annexes_datasets <- tibble::tribble(
+  ~jeu_de_donnees, ~granularite, ~variables_cles, ~valeur_analytique, ~limites,
+  "finess_etablissements.csv", "Etablissement (FINESS geographique)", "nofinesset, rs, departement, coordxet, coordyet", "Base de reference territoriale (volumetrie et localisation)", "Qualite heterogene des libelles et geolocalisations manquantes",
+  "finess_activites_soin.csv", "Ligne d'autorisation d'activite", "nofinesset, libactivite, libmodalite, dateautor", "Mesure l'intensite de l'offre de soins par territoire", "Une ligne = autorisation, pas un volume reel de patients",
+  "finess_disciplines_enseignement.csv", "Ligne de discipline", "nofinesset, libde, libta", "Approche de la specialisation medicale par territoire", "Nomenclature technique, interpretation necessite contexte metier",
+  "finess_materiels_lourds.csv", "Ligne d'equipement", "nofinesset, libeml, datemeo", "Proxy du niveau de plateau technique (IRM, scanners, etc.)", "Presence d'equipement != acces effectif (delais, capacite)",
+  "etalab-cs1100505-stock-20260311-0344.csv", "Mapping FINESS <-> ETALAB", "finess, etalab", "Permet des rapprochements inter-bases (open data, SIREN/SIRET)", "Fichier de correspondance, peu de variables analytiques directes",
+  "departements.geojson", "Departement (polygone)", "code, nom, geometrie", "Support cartographique pour l'analyse spatiale", "Niveau departemental uniquement (masque les disparites infra-territoriales)"
+) |>
+  mutate(nb_lignes = c(nrow(etab_raw), nrow(activites), nrow(disciplines), nrow(materiels), nrow(etalab_map), nrow(dep_geo)))
+
+map_metric_choices <- c(
+  "Etablissements (volume)" = "n_etab",
+  "Activites de soin pour 100 etablissements" = "n_act_per_100",
+  "Disciplines pour 100 etablissements" = "n_de_per_100",
+  "Materiels lourds pour 100 etablissements" = "n_eml_per_100",
+  "Indice composite d'acces (0-100)" = "score_acces"
+)
 
 dep_choices_tbl <- dep_geo |>
   st_drop_geometry() |>
@@ -186,6 +293,8 @@ dep_choices <- c("Tous" = "Tous", setNames(dep_choices_tbl$departement, dep_choi
 }
 ```
 
+# Exploration
+
 Column {.sidebar data-width=300}
 -----------------------------------------------------------------------
 
@@ -193,7 +302,7 @@ Column {.sidebar data-width=300}
 
 ```{r}
 selectInput(
-  inputId = "dep_select",
+  inputId = "dep_select_explo",
   label = "Selection du departement",
   choices = dep_choices,
   selected = "Tous",
@@ -208,6 +317,7 @@ sliderInput(
   value = 30,
   step = 5
 )
+
 ```
 
 ### Lecture de l'axe
@@ -223,10 +333,10 @@ HTML(
 
 ```{r}
 renderValueBox({
-  filtered_etab <- if (input$dep_select == "Tous") {
+  filtered_etab <- if (input$dep_select_explo == "Tous") {
     etab_meta
   } else {
-    etab_meta |> filter(departement == input$dep_select)
+    etab_meta |> filter(departement == input$dep_select_explo)
   }
 
   n <- nrow(filtered_etab)
@@ -241,10 +351,10 @@ renderValueBox({
 
 ```{r}
 renderValueBox({
-  filtered_etab <- if (input$dep_select == "Tous") {
+  filtered_etab <- if (input$dep_select_explo == "Tous") {
     etab_meta
   } else {
-    etab_meta |> filter(departement == input$dep_select)
+    etab_meta |> filter(departement == input$dep_select_explo)
   }
 
   ids <- filtered_etab$nofinesset
@@ -260,10 +370,10 @@ renderValueBox({
 
 ```{r}
 renderValueBox({
-  filtered_etab <- if (input$dep_select == "Tous") {
+  filtered_etab <- if (input$dep_select_explo == "Tous") {
     etab_meta
   } else {
-    etab_meta |> filter(departement == input$dep_select)
+    etab_meta |> filter(departement == input$dep_select_explo)
   }
 
   ids <- filtered_etab$nofinesset
@@ -281,19 +391,23 @@ renderValueBox({
 Column
 -----------------------------------------------------------------------
 
-### Nuage de mots interactif
+### Analyses textuelles {.tabset}
+
+#### Nuage de mots
 
 ```{r}
 renderWordcloud2({
-  filtered_tokens <- if (input$dep_select == "Tous") {
+  top_n <- max(1L, as.integer(input$top_n %||% 30L))
+
+  filtered_tokens <- if (input$dep_select_explo == "Tous") {
     tokens
   } else {
-    tokens |> filter(departement == input$dep_select)
+    tokens |> filter(departement == input$dep_select_explo)
   }
 
   wc <- filtered_tokens |>
     count(token_norm, sort = TRUE) |>
-    slice_head(n = input$top_n) |>
+    slice_head(n = top_n) |>
     rename(word = token_norm, freq = n)
 
   validate(need(nrow(wc) > 0, "Aucun terme disponible pour ce filtre."))
@@ -309,19 +423,21 @@ renderWordcloud2({
 })
 ```
 
-### Bigrammes dominants
+#### Bigrammes
 
 ```{r}
 renderPlotly({
-  filtered_bigrams <- if (input$dep_select == "Tous") {
+  top_n <- max(1L, as.integer(input$top_n %||% 30L))
+
+  filtered_bigrams <- if (input$dep_select_explo == "Tous") {
     bigrams
   } else {
-    bigrams |> filter(departement == input$dep_select)
+    bigrams |> filter(departement == input$dep_select_explo)
   }
 
   df <- filtered_bigrams |>
     count(bigram, sort = TRUE) |>
-    slice_head(n = input$top_n) |>
+    slice_head(n = top_n) |>
     mutate(bigram = forcats::fct_reorder(bigram, n))
 
   validate(need(nrow(df) > 0, "Aucun bigramme disponible pour ce filtre."))
@@ -336,64 +452,109 @@ renderPlotly({
 })
 ```
 
-### Table de synthese textuelle
+#### Table des termes
 
 ```{r}
 renderDT({
-  filtered_tokens <- if (input$dep_select == "Tous") {
+  top_n <- max(1L, as.integer(input$top_n %||% 30L))
+
+  filtered_tokens <- if (input$dep_select_explo == "Tous") {
     tokens
   } else {
-    tokens |> filter(departement == input$dep_select)
+    tokens |> filter(departement == input$dep_select_explo)
   }
 
   validate(need(nrow(filtered_tokens) > 0, "Aucune donnee textuelle pour ce filtre."))
-
   filtered_tokens |>
     count(token_norm, sort = TRUE, name = "frequence") |>
-    slice_head(n = input$top_n) |>
+    slice_head(n = top_n) |>
     datatable(
       rownames = FALSE,
-      options = list(pageLength = 10, dom = "tip"),
+      options = list(pageLength = 12, dom = "tip"),
       colnames = c("terme", "frequence")
     )
 })
 ```
 
-Row
+# Cartographie
+
+Column {.sidebar data-width=300}
 -----------------------------------------------------------------------
 
-### Carte Leaflet: volume d'etablissements et themes territoriaux
+### Filtres cartographiques
+
+```{r}
+selectInput(
+  inputId = "dep_select_carto",
+  label = "Selection du departement",
+  choices = dep_choices,
+  selected = "Tous",
+  selectize = TRUE
+)
+
+selectInput(
+  inputId = "map_metric_carto",
+  label = "Indicateur cartographique",
+  choices = map_metric_choices,
+  selected = "n_etab",
+  selectize = FALSE
+)
+
+HTML(
+  "<b>Lecture :</b> changer d'indicateur pour comparer le volume brut et l'intensite d'offre.<br>
+  Le filtre departement permet de focaliser les analyses detaillees."
+)
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Analyses territoriales {.tabset}
+
+#### Carte departementale
 
 ```{r}
 renderLeaflet({
-  d <- if (input$dep_select == "Tous") {
+  metric_id <- input$map_metric_carto
+  metric_label <- names(map_metric_choices)[match(metric_id, map_metric_choices)]
+
+  d <- if (input$dep_select_carto == "Tous") {
     dep_geo
   } else {
-    dep_geo |> filter(departement == input$dep_select)
+    dep_geo |> filter(departement == input$dep_select_carto)
   }
 
   validate(need(nrow(d) > 0, "Aucune geometrie disponible pour ce departement."))
 
-  pal <- colorBin(
-    palette = "YlOrRd",
-    domain = dep_geo$n_etab,
-    bins = 7,
+  d <- d |>
+    mutate(metric_value = .data[[metric_id]])
+
+  pal <- colorNumeric(
+    palette = "YlGnBu",
+    domain = dep_geo[[metric_id]],
     na.color = "#f0f0f0"
   )
 
   leaflet(d) |>
     addProviderTiles(providers$CartoDB.Positron) |>
     addPolygons(
-      fillColor = ~pal(n_etab),
+      fillColor = ~pal(metric_value),
       weight = 1,
       color = "#4f5d75",
       opacity = 1,
       fillOpacity = 0.75,
       smoothFactor = 0.2,
-      label = ~paste0(departement, " - ", libdepartement, " : ", format(n_etab, big.mark = " "), " etablissements"),
+      label = ~paste0(
+        departement, " - ", libdepartement,
+        " | ", metric_label, " : ", scales::number(metric_value, accuracy = 0.1)
+      ),
       popup = ~paste0(
         "<b>", departement, " - ", libdepartement, "</b><br>",
         "Etablissements: ", format(n_etab, big.mark = " "), "<br><br>",
+        "Activites/100 etab: ", scales::number(n_act_per_100, accuracy = 0.1), "<br>",
+        "Disciplines/100 etab: ", scales::number(n_de_per_100, accuracy = 0.1), "<br>",
+        "Materiels lourds/100 etab: ", scales::number(n_eml_per_100, accuracy = 0.1), "<br>",
+        "Indice composite: ", scales::number(score_acces, accuracy = 0.1), "<br><br>",
         "<b>Themes dominants:</b><br>",
         htmltools::htmlEscape(top_themes)
       )
@@ -401,9 +562,185 @@ renderLeaflet({
     addLegend(
       "bottomright",
       pal = pal,
-      values = dep_geo$n_etab,
-      title = "Nombre d'etablissements",
+      values = dep_geo[[metric_id]],
+      title = metric_label,
       opacity = 0.85
     )
 })
+```
+
+#### Profil territorial
+
+```{r}
+renderPlotly({
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    filter(n_etab > 0)
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |>
+      mutate(selection = "Autres")
+  } else {
+    df |>
+      mutate(selection = if_else(departement == input$dep_select_carto, "Departement selectionne", "Autres"))
+  }
+
+  p <- ggplot(
+    df,
+    aes(
+      x = n_etab,
+      y = n_act_per_100,
+      size = n_eml_per_100,
+      color = selection,
+      text = paste0(
+        departement, " - ", libdepartement,
+        "<br>Etablissements: ", format(n_etab, big.mark = " "),
+        "<br>Activites/100: ", scales::number(n_act_per_100, accuracy = 0.1),
+        "<br>Materiels lourds/100: ", scales::number(n_eml_per_100, accuracy = 0.1),
+        "<br>Indice: ", scales::number(score_acces, accuracy = 0.1)
+      )
+    )
+  ) +
+    geom_point(alpha = 0.85) +
+    scale_color_manual(values = c("Autres" = "#6c757d", "Departement selectionne" = "#1f77b4")) +
+    scale_size_continuous(range = c(3, 14)) +
+    labs(
+      x = "Nombre d'etablissements",
+      y = "Activites de soin pour 100 etablissements",
+      size = "Materiels lourds / 100",
+      color = NULL,
+      title = "Volume vs intensite de l'offre"
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = "text")
+})
+```
+
+#### Comparaison multi-indicateurs
+
+```{r}
+renderPlotly({
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    filter(n_etab > 0)
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |>
+      arrange(desc(score_acces)) |>
+      slice_head(n = 20)
+  } else {
+    df |> filter(departement == input$dep_select_carto)
+  }
+
+  validate(need(nrow(df) > 0, "Pas de departement a afficher."))
+
+  heat <- df |>
+    transmute(
+      departement = paste0(departement, " - ", libdepartement),
+      `Activites/100` = n_act_per_100,
+      `Disciplines/100` = n_de_per_100,
+      `Materiels/100` = n_eml_per_100,
+      `Indice acces` = score_acces
+    ) |>
+    pivot_longer(-departement, names_to = "indicateur", values_to = "valeur")
+
+  p <- ggplot(heat, aes(x = indicateur, y = forcats::fct_rev(departement), fill = valeur)) +
+    geom_tile(color = "white", linewidth = 0.2) +
+    scale_fill_viridis_c(option = "C") +
+    labs(x = NULL, y = NULL, fill = "Valeur", title = "Lecture comparative des departements") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank())
+
+  ggplotly(p)
+})
+```
+
+#### Classement de l'indicateur choisi
+
+```{r}
+renderPlotly({
+  metric_id <- input$map_metric_carto
+  metric_label <- names(map_metric_choices)[match(metric_id, map_metric_choices)]
+
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    filter(n_etab > 0) |>
+    transmute(
+      departement = paste0(departement, " - ", libdepartement),
+      metric_value = .data[[metric_id]]
+    ) |>
+    arrange(desc(metric_value))
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |> slice_head(n = 20)
+  } else {
+    df |>
+      mutate(selection = if_else(str_detect(departement, paste0("^", input$dep_select_carto, " - ")), "Selection", "Autres"))
+  }
+
+  p <- ggplot(df, aes(x = forcats::fct_reorder(departement, metric_value), y = metric_value)) +
+    geom_col(fill = "#457b9d") +
+    coord_flip() +
+    labs(x = NULL, y = metric_label, title = paste0("Classement - ", metric_label)) +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = c("x", "y"))
+})
+```
+
+# Annexes
+
+Column
+-----------------------------------------------------------------------
+
+### Documentation {.tabset}
+
+#### Jeux de donnees
+
+```{r}
+renderDT({
+  annexes_datasets |>
+    mutate(nb_lignes = format(nb_lignes, big.mark = " ")) |>
+    datatable(
+      rownames = FALSE,
+      options = list(pageLength = 10, scrollX = TRUE, dom = "tip"),
+      colnames = c(
+        "Jeu de donnees", "Granularite", "Variables cles", "Valeur analytique", "Limites", "Nb lignes"
+      )
+    )
+})
+```
+
+#### Couverture des sources
+
+```{r}
+renderPlotly({
+  df <- annexes_datasets |>
+    mutate(jeu_de_donnees = forcats::fct_reorder(jeu_de_donnees, nb_lignes))
+
+  p <- ggplot(df, aes(x = jeu_de_donnees, y = nb_lignes)) +
+    geom_col(fill = "#457b9d") +
+    coord_flip() +
+    scale_y_continuous(labels = label_number(big.mark = " ")) +
+    labs(x = NULL, y = "Nombre de lignes", title = "Volume relatif des jeux de donnees") +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = c("x", "y"))
+})
+```
+
+#### Methodologie
+
+```{r}
+HTML(
+  "<b>Comment lire les indicateurs ?</b><br>
+  - Les ratios \"pour 100 etablissements\" mesurent une intensite d'offre, pas une consommation de soins.<br>
+  - L'indice composite combine activites, disciplines et materiels lourds (echelle 0-100).<br>
+  - Les resultats restent macroscopiques: un departement peut etre bien dote mais heterogene localement.<br><br>
+  <b>Pistes de prolongement :</b><br>
+  - Croiser avec des donnees de population/age pour approcher l'equite territoriale.<br>
+  - Integrer temps d'acces routier ou transport public pour une mesure effective d'accessibilite.<br>
+  - Ajouter une evolution temporelle via les dates d'autorisation et de mise en oeuvre."
+)
 ```
