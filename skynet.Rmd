@@ -160,10 +160,11 @@ extract_dep <- function(nofinesset) {
 
 
 # ── 4. Chargement des données brutes ─────────────────────────────────────────
-# Lecture des 4 fichiers sources + jointure géographique.
+# Lecture des fichiers sources + jointure géographique.
 # DATA_PATH : dossier contenant les données (à adapter si nécessaire).
 DATA_PATH <- "Data/"   # ← Modifier si vos fichiers sont ailleurs
 
+etablissements <- read_finess_csv(file.path(DATA_PATH, "finess_etablissements.csv"))
 activites   <- read_finess_csv(file.path(DATA_PATH, "finess_activites_soin.csv"))
 disciplines <- read_finess_csv(file.path(DATA_PATH, "finess_disciplines_enseignement.csv"))
 materiels   <- read_finess_csv(file.path(DATA_PATH, "finess_materiels_lourds.csv"))
@@ -330,14 +331,22 @@ dep_geo <- sf::st_read(
 # Pipeline robuste aligné avec la logique validée du dashboard de référence.
 # Étapes : normalisation UTF-8, nettoyage, tokenisation, stop-words, TF-IDF.
 
-# 8a. Corpus des noms d'établissements uniques par département
-corpus_etab <- activites_clean |>
-  select(nofinesset, dep, rset) |>
+# 8a. Corpus des noms d'établissements (rs) par département
+# Aligné sur Dashboard_Sante_Territoires : source = finess_etablissements.csv
+corpus_etab <- etablissements |>
+  transmute(
+    nofinesset,
+    dep = dplyr::coalesce(
+      dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
+      extract_dep(nofinesset)
+    ),
+    rs
+  ) |>
+  filter(!is.na(rs), rs != "") |>
   distinct(nofinesset, .keep_all = TRUE) |>
-  filter(!is.na(rset), rset != "") |>
   mutate(
-    rset_utf8  = enc2utf8(rset),
-    text_clean = rset_utf8 |>
+    rs_utf8    = enc2utf8(rs),
+    text_clean = rs_utf8 |>
       stringr::str_replace_all("['’]", " ") |>
       stringr::str_replace_all("[^[:alnum:] ]", " ") |>
       stringr::str_squish()
@@ -1129,7 +1138,7 @@ renderPlotly({
 <!--
   PAGE 3 — ANALYSE TEXTUELLE
   Objectif : explorer la sémantique des noms d'établissements.
-  On tokenise les noms (rset), on supprime les stop-words métier,
+  On tokenise les noms (rs), on supprime les stop-words métier,
   puis on visualise les termes et bigrammes les plus fréquents
   ainsi que les termes spécifiques à chaque département (TF-IDF).
 -->
@@ -1160,7 +1169,7 @@ sliderInput(
 ```{r p3-info}
 HTML('
 <div class="info-card">
-  <strong>Source</strong> — Noms d\'établissements géographiques (<em>rset</em>) issus des autorisations.<br><br>
+  <strong>Source</strong> — Noms d\'établissements géographiques (<em>rs</em>) issus du fichier établissements FINESS.<br><br>
   <strong>Traitement</strong><br>
   1. Nettoyage (apostrophes, accents)<br>
   2. Tokenisation en mots<br>
