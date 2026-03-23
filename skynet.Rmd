@@ -340,6 +340,7 @@ corpus_etab <- etablissements |>
       dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
       extract_dep(nofinesset)
     ),
+    commune,
     rs
   ) |>
   filter(!is.na(rs), rs != "") |>
@@ -351,6 +352,36 @@ corpus_etab <- etablissements |>
       stringr::str_replace_all("[^[:alnum:] ]", " ") |>
       stringr::str_squish()
   )
+
+# 8a-bis. Tokens de toponymes a exclure (par departement)
+# Objectif : eviter que les noms de villes/villages dominent l'analyse
+# (ex: "Tours" pour le departement 37) tout en conservant les mots metier.
+toponym_tokens <- etablissements |>
+  transmute(
+    dep = dplyr::coalesce(
+      dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
+      extract_dep(nofinesset)
+    ),
+    geo_text = paste(commune, ligneacheminement, libdepartement)
+  ) |>
+  filter(!is.na(dep), dep != "", !is.na(geo_text), geo_text != "") |>
+  mutate(
+    geo_text = geo_text |>
+      normalize_text() |>
+      stringr::str_replace_all("['’-]", " ") |>
+      stringr::str_replace_all("[^[:alnum:] ]", " ") |>
+      stringr::str_squish()
+  ) |>
+  tidytext::unnest_tokens(
+    output = word_norm,
+    input  = geo_text,
+    token  = "words"
+  ) |>
+  filter(
+    stringr::str_detect(word_norm, "[a-z]"),
+    stringr::str_length(word_norm) > 2
+  ) |>
+  distinct(dep, word_norm)
 
 # 8b. Stop-words : français standard + termes métier peu discriminants
 stop_fr <- tibble(
@@ -396,7 +427,8 @@ tokens_etab <- corpus_etab |>
     stringr::str_detect(word_norm, "[a-z]"),
     stringr::str_length(word_norm) > 2
   ) |>
-  anti_join(stop_all, by = "word_norm")
+  anti_join(stop_all, by = "word_norm") |>
+  anti_join(toponym_tokens, by = c("dep", "word_norm"))
 
 # 8d. Bigrammes : paires de mots consécutifs dans les noms
 bigrams_etab <- corpus_etab |>
