@@ -1391,25 +1391,25 @@ renderPlot({
 }, res = 96)
 ```
 
-### 📊 Fréquence des termes
+### 📊 Fréquence & 🏥 Mots-clés établissements
 
-```{r p3-freq}
-# Barres horizontales des termes les plus fréquents.
-# Complémentaire au nuage de mots avec des valeurs exactes.
+```{r p3-freq-motscles}
+# Deux graphiques dans un seul onglet, affiches cote a cote (50% / 50%).
 renderPlotly({
   top_n <- max(1L, as.integer(input$top_n_text %||% 30L))
   dep   <- input$dep_text
 
-  df <- if (dep == "Tous") tokens_etab else tokens_etab |> filter(dep == !!dep)
+  # --- Graphe 1 : frequence des termes ---
+  df_tokens <- if (dep == "Tous") tokens_etab else tokens_etab |> filter(dep == !!dep)
 
-  df_agg <- df |>
+  df_freq <- df_tokens |>
     count(word_norm, sort = TRUE) |>
     slice_head(n = top_n) |>
     mutate(word_norm = forcats::fct_reorder(word_norm, n))
 
-  validate(need(nrow(df_agg) > 0, "Aucun terme disponible."))
+  validate(need(nrow(df_freq) > 0, "Aucun terme disponible."))
 
-  p <- ggplot(df_agg, aes(
+  p_freq <- ggplot(df_freq, aes(
     x = word_norm, y = n,
     text = paste0("<b>", word_norm, "</b><br>",
                   format(n, big.mark = "\u202f"), " occurrences")
@@ -1420,46 +1420,34 @@ renderPlotly({
     scale_y_continuous(expand = expansion(mult = c(0, .15))) +
     labs(
       x = NULL, y = "Occurrences",
-      title = "Termes les plus fréquents dans les noms d'établissements",
-      subtitle = "Stop-words métier et génériques supprimés"
+      title = "Frequence des termes",
+      subtitle = "Stop-words metier et generiques supprimes"
     ) +
     theme_finess()
 
-  ggplotly(p, tooltip = "text") |>
-    layout(font = list(family = "IBM Plex Sans"))
-})
-```
+  # --- Graphe 2 : mots-cles structurels ---
+  df_etab <- if (dep == "Tous") corpus_etab else corpus_etab |> filter(dep == !!dep)
 
-### 🏥 Mots-clés établissements
-
-```{r p3-bigrams}
-# Présence de mots-clés structurels dans les noms d'établissements.
-# Cette vue cible explicitement les termes demandés (hôpital, clinique, SSIAD...).
-renderPlotly({
-  dep   <- input$dep_text
-
-  df <- if (dep == "Tous") corpus_etab else corpus_etab |> filter(dep == !!dep)
-
-  validate(need(nrow(df) > 0, "Aucun établissement disponible pour ce filtre."))
+  validate(need(nrow(df_etab) > 0, "Aucun établissement disponible pour ce filtre."))
 
   df_cat <- motifs_struct |>
     rowwise() |>
     mutate(
-      n = sum(stringr::str_detect(normalize_text(df$text_clean), stringr::regex(pattern))),
-      pct = 100 * n / nrow(df)
+      n = sum(stringr::str_detect(normalize_text(df_etab$text_clean), stringr::regex(pattern))),
+      pct = 100 * n / nrow(df_etab)
     ) |>
     ungroup() |>
     filter(n > 0) |>
     arrange(desc(n)) |>
     mutate(categorie = forcats::fct_reorder(categorie, n))
 
-  validate(need(nrow(df_cat) > 0, "Aucun mot-clé structurel détecté."))
+  validate(need(nrow(df_cat) > 0, "Aucun mot-cle structurel detecte."))
 
-  p <- ggplot(df_cat, aes(
+  p_motscles <- ggplot(df_cat, aes(
     x = categorie, y = n,
     text = paste0("<b>", categorie, "</b><br>",
-                  format(n, big.mark = "\u202f"), " établissements<br>",
-                  "Soit ", scales::number(pct, accuracy = .1), " % de la sélection")
+                  format(n, big.mark = "\u202f"), " etablissements<br>",
+                  "Soit ", scales::number(pct, accuracy = .1), " % de la selection")
   )) +
     geom_col(fill = PAL$success, width = .78) +
     geom_text(aes(label = n), hjust = -.12, size = 3, colour = PAL$muted) +
@@ -1467,13 +1455,22 @@ renderPlotly({
     scale_y_continuous(expand = expansion(mult = c(0, .15))) +
     labs(
       x = NULL, y = "Occurrences",
-      title = "Mots-clés structurels dans les noms d'établissements",
-      subtitle = "Comptage des établissements contenant des termes comme hopital, clinique, SSIAD/SSAD..."
+      title = "Mots-cles etablissements",
+      subtitle = "Hopital, clinique, SSIAD/SSAD..."
     ) +
     theme_finess()
 
-  ggplotly(p, tooltip = "text") |>
-    layout(font = list(family = "IBM Plex Sans"))
+  subplot(
+    ggplotly(p_freq, tooltip = "text"),
+    ggplotly(p_motscles, tooltip = "text"),
+    nrows = 1,
+    widths = c(0.5, 0.5),
+    margin = 0.05,
+    shareY = FALSE,
+    titleX = TRUE,
+    titleY = TRUE
+  ) |>
+    layout(font = list(family = "IBM Plex Sans"), showlegend = FALSE)
 })
 ```
 
