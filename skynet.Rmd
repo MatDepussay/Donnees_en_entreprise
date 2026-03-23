@@ -1314,19 +1314,48 @@ renderPlot({
       bind_rows(wc_all |> filter(word_norm == "pharmacie"))
   }
 
+  # Important: si un mot est ajoute manuellement (ex: pharmacie),
+  # on retrie par frequence pour que les mots majeurs soient places en premier.
+  wc <- wc |>
+    arrange(desc(n)) |>
+    mutate(freq_plot = log1p(n))
+
   validate(need(nrow(wc) > 0, "Aucun terme disponible pour ce filtre."))
 
   set.seed(123)
   par(mar = c(0, 0, 0, 0), bg = "white")
-  wordcloud::wordcloud(
-    words = wc$word_norm,
-    freq = wc$n,
-    scale = c(4.2, 0.9),
-    min.freq = 1,
-    random.order = FALSE,
-    rot.per = 0.2,
-    colors = colorRampPalette(c("#1a3a5c", "#2176ae", "#00b4d8", "#06a77d", "#f4a261"))(max(8, nrow(wc)))
-  )
+
+  # Rendu adaptatif : on tente plusieurs echelles pour eviter les warnings
+  # "could not be fit on page" et stabiliser l'affichage.
+  draw_wc_once <- function(scale_max, scale_min = 0.65) {
+    warned <- FALSE
+    withCallingHandlers(
+      {
+        wordcloud::wordcloud(
+          words = wc$word_norm,
+          freq = wc$freq_plot,
+          scale = c(scale_max, scale_min),
+          min.freq = 1,
+          random.order = FALSE,
+          rot.per = 0,
+          fixed.asp = FALSE,
+          colors = colorRampPalette(c("#1a3a5c", "#2176ae", "#00b4d8", "#06a77d", "#f4a261"))(max(8, nrow(wc)))
+        )
+      }, 
+      warning = function(w) {
+        warned <<- TRUE
+        invokeRestart("muffleWarning")
+      }
+    )
+    warned
+  }
+
+  warned <- TRUE
+  for (s in c(3.0, 2.6, 2.3, 2.0, 1.8)) {
+    warned <- draw_wc_once(scale_max = s)
+    if (!warned) break
+    plot.new()
+  }
 }, res = 96)
 ```
 
