@@ -1,0 +1,2154 @@
+---
+title: "FINESS — Offre de Soins & Territoires"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    logo: null
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+# ============================================================
+# BLOC GLOBAL — Chargement des packages et préparation des données
+# Ce bloc s'exécute une seule fois au démarrage de l'application.
+# Toutes les données préparées ici sont partagées entre les onglets.
+# ============================================================
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# ── 1. Vérification et chargement des packages ──────────────────────────────
+required_packages <- c(
+  "flexdashboard", "shiny", "tidyverse", "tidytext", "wordcloud2",
+  "wordcloud", "leaflet", "sf", "DT", "plotly", "stopwords", "scales",
+  "htmltools", "stringi", "lubridate"
+)
+
+missing_pkgs <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+if (length(missing_pkgs) > 0) {
+  stop(paste0(
+    "Packages manquants : ", paste(missing_pkgs, collapse = ", "),
+    "\nInstalle-les avec : install.packages(c(",
+    paste0('"', missing_pkgs, '"', collapse = ", "), "))"
+  ))
+}
+
+library(flexdashboard); library(shiny);      library(tidyverse)
+library(tidytext);      library(wordcloud2); library(leaflet)
+library(wordcloud)
+library(sf);            library(DT);         library(plotly)
+library(stopwords);     library(scales);     library(htmltools)
+library(stringi);       library(lubridate)
+
+
+# ── 2. Paramètres globaux ────────────────────────────────────────────────────
+PAL <- list(
+  primary   = "#1a3a5c",   
+  secondary = "#2176ae",   
+  accent    = "#00b4d8",   
+  success   = "#06a77d",   
+  warn      = "#f4a261",   
+  danger    = "#c1121f",   
+  light     = "#f0f4f8",   
+  muted     = "#8896a8",   
+  border    = "#d0dce8"    
+)
+
+theme_finess <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      text              = element_text(family = "sans", colour = PAL$primary),
+      plot.title        = element_text(face = "bold", size = rel(1.1),
+                                       margin = margin(b = 6)),
+      plot.subtitle     = element_text(colour = PAL$muted, size = rel(0.88),
+                                       margin = margin(b = 8)),
+      axis.text         = element_text(colour = "#4a5568"),
+      axis.title        = element_text(colour = PAL$muted, size = rel(0.85)),
+      panel.grid.major  = element_line(colour = "#e8edf2", linewidth = 0.45),
+      panel.grid.minor  = element_blank(),
+      plot.background   = element_rect(fill = "white", colour = NA),
+      panel.background  = element_rect(fill = "white", colour = NA),
+      legend.position   = "bottom",
+      legend.background = element_rect(fill = "white", colour = NA)
+    )
+}
+
+
+# ── 3. Fonctions utilitaires de lecture ──────────────────────────────────────
+read_finess_csv <- function(path) {
+  guessed <- readr::guess_encoding(path, n_max = 20000)
+  enc <- guessed |>
+    dplyr::slice_head(n = 1) |>
+    dplyr::pull(encoding)
+  if (length(enc) == 0 || is.na(enc) || enc == "") enc <- "UTF-8"
+
+  readr::read_delim(
+    file         = path,
+    delim        = ";",
+    col_types    = readr::cols(.default = readr::col_character()),
+    trim_ws      = TRUE,
+    locale       = readr::locale(encoding = enc),
+    show_col_types = FALSE,
+    progress     = FALSE
+  )
+}
+
+normalize_text <- function(x) {
+  x |>
+    enc2utf8() |>
+    stringi::stri_trans_general("Latin-ASCII") |>
+    stringr::str_to_lower()
+}
+
+extract_dep <- function(nofinesset) {
+  stringr::str_sub(nofinesset, 1, 2)
+}
+
+
+# ── 4. Chargement des données brutes ─────────────────────────────────────────
+DATA_PATH <- "C:/Donnees_en_entreprise/Data"
+
+etablissements <- read_finess_csv(file.path(DATA_PATH, "finess_etablissements.csv"))
+activites   <- read_finess_csv(file.path(DATA_PATH, "finess_activites_soin.csv"))
+disciplines <- read_finess_csv(file.path(DATA_PATH, "finess_disciplines_enseignement.csv"))
+materiels   <- read_finess_csv(file.path(DATA_PATH, "finess_materiels_lourds.csv"))
+etalab_raw  <- read_finess_csv(file.path(DATA_PATH, "etalab-cs1100505-stock-20260311-0344.csv")) |>
+  setNames(c("type_lien", "finess", "etalab", "meta"))
+
+
+# ── 5. Nettoyage et enrichissement des tables principales ────────────────────
+activites_clean <- activites |>
+  mutate(
+    dep         = extract_dep(nofinesset),
+    dateautor   = lubridate::ymd(dateautor, quiet = TRUE),
+    datemeo     = lubridate::ymd(datemeo,   quiet = TRUE),
+    datefin     = lubridate::ymd(datefin,   quiet = TRUE),
+    annee_autr  = lubridate::year(dateautor),
+    annee_meo   = lubridate::year(datemeo),
+    lib_act_court = str_trunc(libactivite, 60),
+    encore_actif = is.na(datefin) | datefin > Sys.Date()
+  )
+
+disciplines_clean <- disciplines |>
+  mutate(
+    dep       = extract_dep(nofinesset),
+    dateautor = lubridate::ymd(dateautor, quiet = TRUE),
+    annee     = lubridate::year(dateautor),
+    capaut_n  = suppressWarnings(as.integer(capaut))
+  )
+
+materiels_clean <- materiels |>
+  mutate(
+    dep       = extract_dep(nofinesset),
+    dateautor = lubridate::ymd(dateautor, quiet = TRUE),
+    datemeo   = lubridate::ymd(datemeo,   quiet = TRUE),
+    annee_meo = lubridate::year(datemeo),
+    lib_eml_court = case_when(
+      str_detect(libeml, "IRM|imagerie")                   ~ "IRM clinique",
+      str_detect(libeml, "Scanographe")                    ~ "Scanner médical",
+      str_detect(libeml, "Tomographe")                     ~ "Tomographe TEP",
+      str_detect(libeml, "scintillation.*sans")            ~ "Gamma-caméra (sans PET)",
+      str_detect(libeml, "scintillation.*avec")            ~ "Gamma-caméra (avec PET)",
+      str_detect(libeml, "Caisson")                        ~ "Caisson hyperbare",
+      str_detect(libeml, "Cyclotron")                      ~ "Cyclotron médical",
+      str_detect(libeml, "positons")                       ~ "Caméra à positons",
+      TRUE                                                  ~ str_trunc(libeml, 45)
+    )
+  )
+
+etalab_map <- etalab_raw |>
+  filter(type_lien == "structureet") |>
+  transmute(nofinesset = finess, etalab) |>
+  distinct(nofinesset, .keep_all = TRUE)
+
+
+# ── 6. Agrégation par département ────────────────────────────────────────────
+dep_act <- activites_clean |>
+  group_by(dep) |>
+  summarise(
+    n_etab_act      = n_distinct(nofinesset),     
+    n_autorisations = n(),                          
+    n_types_act     = n_distinct(libactivite),      
+    n_actives       = sum(encore_actif, na.rm = TRUE), 
+    taux_actif      = mean(encore_actif, na.rm = TRUE), 
+    annee_min       = min(annee_autr[annee_autr > 1950], na.rm = TRUE), 
+    annee_med       = median(annee_autr[annee_autr > 1950], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dep_dis <- disciplines_clean |>
+  group_by(dep) |>
+  summarise(
+    n_etab_dis   = n_distinct(nofinesset),
+    n_formations = n(),
+    n_types_dis  = n_distinct(libde),
+    cap_total    = sum(capaut_n, na.rm = TRUE),   
+    cap_moy      = mean(capaut_n, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+dep_mat <- materiels_clean |>
+  group_by(dep) |>
+  summarise(
+    n_etab_mat  = n_distinct(nofinesset),
+    n_mat_total = n(),
+    n_types_mat = n_distinct(libeml),
+    n_irm       = sum(str_detect(libeml, "IRM|imagerie"), na.rm = TRUE),
+    n_scanner   = sum(str_detect(libeml, "Scanographe"), na.rm = TRUE),
+    n_tep       = sum(str_detect(libeml, "Tomographe"), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dep_etalab <- activites_clean |>
+  select(nofinesset, dep) |>
+  distinct() |>
+  left_join(etalab_map, by = "nofinesset") |>
+  group_by(dep) |>
+  summarise(
+    n_etab_total_act = n_distinct(nofinesset),
+    n_avec_etalab  = n_distinct(nofinesset[!is.na(etalab)]),
+    pct_etalab     = 100 * n_avec_etalab / n_etab_total_act,
+    .groups = "drop"
+  )
+
+dep_etab_total <- etablissements |>
+  transmute(
+    nofinesset,
+    dep = dplyr::coalesce(
+      dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
+      extract_dep(nofinesset)
+    )
+  ) |>
+  filter(!is.na(dep), dep != "") |>
+  distinct(nofinesset, dep) |>
+  count(dep, name = "n_etab_total")
+
+dep_stats <- dep_act |>
+  full_join(dep_dis,    by = "dep") |>
+  full_join(dep_mat,    by = "dep") |>
+  full_join(dep_etalab, by = "dep") |>
+  full_join(dep_etab_total, by = "dep") |>
+  mutate(
+    across(where(is.integer), ~replace_na(., 0L)),
+    across(where(is.double),  ~replace_na(., 0)),
+    score_offre = scales::rescale(
+      0.4 * scales::rescale(n_autorisations, to = c(0,1)) +
+      0.3 * scales::rescale(n_formations,    to = c(0,1)) +
+      0.3 * scales::rescale(n_mat_total,     to = c(0,1)),
+      to = c(0, 100)
+    )
+  )
+
+# ── 7. Données géographiques ─────────────────────────────────────────────────
+dep_geo <- sf::st_read(
+  file.path(DATA_PATH, "departements.geojson"), quiet = TRUE
+) |>
+  mutate(
+    dep  = stringr::str_pad(as.character(code), 2, pad = "0"),
+    nom  = as.character(nom)
+  ) |>
+  sf::st_transform(4326) |>
+  left_join(dep_stats, by = "dep") |>
+  mutate(
+    across(where(is.integer), ~replace_na(., 0L)),
+    across(where(is.double),  ~replace_na(., 0))
+  )
+
+# ── 8. Analyse textuelle ─────────────────────────────────────────────────────
+corpus_etab <- etablissements |>
+  transmute(
+    nofinesset,
+    dep = dplyr::coalesce(
+      dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
+      extract_dep(nofinesset)
+    ),
+    commune,
+    rs
+  ) |>
+  filter(!is.na(rs), rs != "") |>
+  distinct(nofinesset, .keep_all = TRUE) |>
+  mutate(
+    rs_utf8    = enc2utf8(rs),
+    text_clean = rs_utf8 |>
+      stringr::str_replace_all("['’]", " ") |>
+      stringr::str_replace_all("[^[:alnum:] ]", " ") |>
+      stringr::str_squish()
+  )
+
+toponym_tokens <- etablissements |>
+  transmute(
+    dep = dplyr::coalesce(
+      dplyr::na_if(stringr::str_to_upper(stringr::str_trim(departement)), ""),
+      extract_dep(nofinesset)
+    ),
+    geo_text = paste(commune, ligneacheminement, libdepartement)
+  ) |>
+  filter(!is.na(dep), dep != "", !is.na(geo_text), geo_text != "") |>
+  mutate(
+    geo_text = geo_text |>
+      normalize_text() |>
+      stringr::str_replace_all("['’-]", " ") |>
+      stringr::str_replace_all("[^[:alnum:] ]", " ") |>
+      stringr::str_squish()
+  ) |>
+  tidytext::unnest_tokens(
+    output = word_norm,
+    input  = geo_text,
+    token  = "words"
+  ) |>
+  filter(
+    stringr::str_detect(word_norm, "[a-z]"),
+    stringr::str_length(word_norm) > 2
+  ) |>
+  distinct(dep, word_norm)
+
+stop_fr <- tibble(
+  word_norm = normalize_text(stopwords::stopwords("fr", source = "snowball"))
+)
+stop_metier <- tibble(
+  word_norm = c(
+    "centre", "centres", "etablissement", "etablissements", "site", "sites",
+    "groupement", "pole", "poles", "service", "services", "unite", "unites",
+    "maison", "sante", "institut", "association", "residence", "foyer",
+    "de", "du", "des", "d", "l", "le", "la", "les", "aux", "sur",
+    "chez", "en", "au", "et", "ou",
+    "sa", "sas", "sasu", "sarl", "selarl", "selas", "scp", "scm", "sci",
+    "eurl", "gie", "ei", "sea", "searl",
+    "jour", "vie", "accueil", "sociale", "domicile", "adultes", "enfants",
+    "hebergement", "nord", "sud", "paris", "val", "pays", "saint", "jean",
+    "siege", "asso", "ctre"
+  )
+)
+stop_all <- bind_rows(stop_fr, stop_metier) |>
+  distinct()
+
+tokens_etab <- corpus_etab |>
+  tidytext::unnest_tokens(
+    output = word,
+    input  = text_clean,
+    token  = "words"
+  ) |>
+  mutate(
+    word_norm = normalize_text(word),
+    word_norm = dplyr::case_when(
+      word_norm %in% c("pharmacies", "officine", "officines") ~ "pharmacie",
+      TRUE ~ word_norm
+    ),
+    word_norm = dplyr::if_else(word_norm %in% c("ssad", "ssiad"), "ssiad", word_norm)
+  ) |>
+  filter(
+    stringr::str_detect(word_norm, "[a-z]"),
+    stringr::str_length(word_norm) > 2
+  ) |>
+  anti_join(stop_all, by = "word_norm") |>
+  anti_join(toponym_tokens, by = c("dep", "word_norm"))
+
+bigrams_etab <- corpus_etab |>
+  tidytext::unnest_tokens(
+    output = bigram,
+    input  = text_clean,
+    token  = "ngrams", n = 2
+  ) |>
+  tidyr::separate(bigram, into = c("w1", "w2"), sep = " ", remove = FALSE) |>
+  mutate(
+    w1 = normalize_text(w1),
+    w2 = normalize_text(w2)
+  ) |>
+  filter(
+    !is.na(w1), !is.na(w2),
+    stringr::str_detect(w1, "[a-z]"), stringr::str_detect(w2, "[a-z]"),
+    stringr::str_length(w1) > 2, stringr::str_length(w2) > 2
+  ) |>
+  anti_join(stop_all |> rename(w1 = word_norm), by = "w1") |>
+  anti_join(stop_all |> rename(w2 = word_norm), by = "w2") |>
+  mutate(bigram = paste(w1, w2))
+
+tfidf_dep <- tokens_etab |>
+  count(dep, word_norm, name = "n") |>
+  tidytext::bind_tf_idf(word_norm, dep, n)
+
+div_semantique <- tokens_etab |>
+  count(dep, word_norm, name = "n") |>
+  group_by(dep) |>
+  summarise(
+    entropie      = -sum((n / sum(n)) * log2(n / sum(n))),
+    n_termes_uniq = n_distinct(word_norm),
+    .groups = "drop"
+  )
+
+motifs_struct <- tibble::tribble(
+  ~categorie,                ~pattern,                                                              ~explication,
+  "Pharmacie",              "\\bpharmacie\\b|\\bpharmacies\\b|\\bofficine\\b|\\bofficines\\b", "Officine ou structure pharmaceutique",
+  "Hopital",                "\\bhopital\\b|\\bhopitaux\\b",                                  "Etablissements hospitaliers (terme complet)",
+  "CHRU",                   "\\bchru\\b",                                                        "Centre hospitalier regional universitaire",
+  "CHR",                    "\\bchr\\b",                                                         "Centre hospitalier regional",
+  "CHU",                    "\\bchu\\b",                                                         "Centre hospitalier universitaire",
+  "CH",                     "\\bch\\b|centre hospitalier",                                       "Centre hospitalier",
+  "Clinique",               "\\bclinique\\b|\\bcliniques\\b",                                "Etablissements de type clinique",
+  "SSIAD / SSAD",           "\\bssiad\\b|\\bssad\\b",                                        "Services de soins infirmiers a domicile",
+  "EHPAD",                  "\\behpad\\b",                                                      "Etablissements d'hebergement pour personnes agees dependantes",
+  "SSR",                    "\\bssr\\b",                                                        "Soins de suite et de readaptation",
+  "HAD",                    "\\bhad\\b|hospitalisation a domicile",                             "Hospitalisation a domicile",
+  "Maison de sante",        "maison de sante",                                                     "Maison de sante pluriprofessionnelle",
+  "Centre de sante",        "centre de sante",                                                     "Structure ambulatoire de soins",
+  "CMP",                    "\\bcmp\\b|centre medico psychologique",                             "Centre medico-psychologique",
+  "IME",                    "\\bime\\b|institut medico educatif",                               "Institut medico-educatif",
+  "ESAT",                   "\\besat\\b",                                                       "Etablissement et service d'aide par le travail",
+  "MAS",                    "\\bmas\\b|maison d accueil specialisee",                            "Maison d'accueil specialisee",
+  "FAM",                    "\\bfam\\b|foyer d accueil medicalise",                              "Foyer d'accueil medicalise",
+  "SESSAD",                 "\\bsessad\\b",                                                     "Service d'education speciale et de soins a domicile"
+)
+
+lexique_termes <- tibble::tribble(
+  ~word_norm,      ~explication,
+  "pharmacie",    "Officine ou structure pharmaceutique",
+  "ehpad",        "Etablissement d'hebergement pour personnes agees dependantes",
+  "saad",         "Service d'aide et d'accompagnement a domicile",
+  "lbm",          "Laboratoire de biologie medicale",
+  "cmp",          "Centre medico-psychologique",
+  "msp",          "Maison de sante pluriprofessionnelle",
+  "ssiad",        "Service de soins infirmiers a domicile",
+  "esat",         "Etablissement et service d'aide par le travail",
+  "sessad",       "Service d'education speciale et de soins a domicile",
+  "ime",          "Institut medico-educatif",
+  "gcs",          "Groupement de cooperation sanitaire",
+  "cattp",        "Centre d'accueil therapeutique a temps partiel",
+  "savs",         "Service d'accompagnement a la vie sociale",
+  "chu",          "Centre hospitalier universitaire",
+  "chru",         "Centre hospitalier regional universitaire",
+  "chr",          "Centre hospitalier regional",
+  "ch",           "Centre hospitalier",
+  "mas",          "Maison d'accueil specialisee",
+  "cpts",         "Communaute professionnelle territoriale de sante",
+  "ccas",         "Centre communal d'action sociale",
+  "clinique",     "Etablissement de sante prive",
+  "chrs",         "Centre d'hebergement et de reinsertion sociale",
+  "hopital",      "Etablissement hospitalier",
+  "mecs",         "Maison d'enfants a caractere social",
+  "samsah",       "Service d'accompagnement medico-social pour adultes handicapes",
+  "pmi",          "Protection maternelle et infantile",
+  "eam",          "Etablissement d'accueil medicalise",
+  "medico",       "Reference au secteur medico-social",
+  "ssr",          "Soins de suite et de readaptation",
+  "had",          "Hospitalisation a domicile",
+  "admr",         "Aide a domicile en milieu rural (reseau associatif)"
+)
+
+
+# ── 9. Données temporelles ───────────────────────────────────────────────────
+timeline_act <- activites_clean |>
+  filter(!is.na(annee_autr), annee_autr >= 1960, annee_autr <= 2025) |>
+  count(annee_autr, libactivite, name = "n") |>
+  group_by(annee_autr) |>
+  mutate(n_total_annee = sum(n)) |>
+  ungroup()
+
+timeline_cumul <- activites_clean |>
+  filter(!is.na(annee_autr), annee_autr >= 1960, annee_autr <= 2025) |>
+  count(annee_autr, name = "n_nouvelles") |>
+  arrange(annee_autr) |>
+  mutate(cumul = cumsum(n_nouvelles))
+
+top_activites <- activites_clean |>
+  count(libactivite, sort = TRUE) |>
+  slice_head(n = 15) |>
+  pull(libactivite)
+
+
+# ── 10. Choix pour les menus déroulants ─────────────────────────────────────
+map_metrics <- c(
+  "Nombre d'autorisations d'activité"   = "n_autorisations",
+  "Diversité des activités (nb types)"  = "n_types_act",
+  "Capacité de formation (nb places)"   = "cap_total",
+  "Matériels lourds (nb équipements)"   = "n_mat_total",
+  "Couverture ETALAB (%)"               = "pct_etalab",
+  "Indice composite d'offre (0-100)"    = "score_offre"
+)
+
+dep_choices_tbl <- dep_geo |>
+  sf::st_drop_geometry() |>
+  filter(!is.na(dep)) |>
+  distinct(dep, nom) |>
+  arrange(dep)
+dep_choices <- c("Tous" = "Tous",
+                 setNames(dep_choices_tbl$dep,
+                          paste0(dep_choices_tbl$dep, " — ", dep_choices_tbl$nom)))
+```
+
+```{css}
+/* ============================================================
+   STYLES GLOBAUX DU DASHBOARD
+   ============================================================ */
+
+@import url('[https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap](https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap)');
+
+:root {
+  --primary:   #1a3a5c;
+  --secondary: #2176ae;
+  --accent:    #00b4d8;
+  --success:   #06a77d;
+  --warn:      #f4a261;
+  --danger:    #c1121f;
+  --light:     #f0f4f8;
+  --muted:     #8896a8;
+  --border:    #d0dce8;
+  --card:      #ffffff;
+  --shadow:    0 2px 14px rgba(26,58,92,.10);
+  --radius:    10px;
+}
+
+body, .flexdashboard {
+  font-family: 'IBM Plex Sans', sans-serif !important;
+  background: var(--light) !important;
+  color: var(--primary) !important;
+}
+
+.navbar {
+  background: linear-gradient(135deg, var(--primary) 0%, #0f2540 100%) !important;
+  border-bottom: 3px solid var(--accent) !important;
+  box-shadow: 0 4px 18px rgba(0,0,0,.25) !important;
+  padding: 0 1.5rem !important;
+}
+.navbar-brand {
+  font-weight: 700 !important;
+  font-size: 1.1rem !important;
+  color: #fff !important;
+  letter-spacing: .03em !important;
+}
+.navbar-brand::before { content: "⚕ "; color: var(--accent); }
+.navbar-nav > li > a {
+  color: rgba(255,255,255,.80) !important;
+  font-weight: 500 !important;
+  font-size: .88rem !important;
+  border-bottom: 2px solid transparent !important;
+  transition: all .2s !important;
+}
+.navbar-nav > li.active > a,
+.navbar-nav > li > a:hover {
+  color: var(--accent) !important;
+  border-bottom-color: var(--accent) !important;
+  background: transparent !important;
+}
+
+/* ── Sidebar (Textes plus gros !) ── */
+.section.sidebar {
+  background: var(--card) !important;
+  border-right: 1px solid var(--border) !important;
+  box-shadow: 2px 0 10px rgba(26,58,92,.07) !important;
+  padding: 1rem 1.1rem !important;
+  overflow-y: auto;
+}
+.section.sidebar h3 {
+  font-size: 1.15rem !important; /* PLus gros */
+  font-weight: 700 !important;
+  letter-spacing: .08em !important;
+  text-transform: uppercase !important;
+  color: var(--primary) !important; 
+  border-bottom: 2px solid var(--border) !important;
+  padding-bottom: .4rem !important;
+  margin: 1.2rem 0 .8rem !important;
+}
+.section.sidebar h3:first-child { margin-top: .1rem !important; }
+
+/* ── Inputs (Textes plus gros !) ── */
+.form-control, .selectize-input {
+  border: 1.5px solid var(--border) !important;
+  border-radius: 7px !important; 
+  font-size: 1.05rem !important; /* Plus gros */
+  transition: border-color .2s, box-shadow .2s !important;
+}
+.form-control:focus, .selectize-input.focus {
+  border-color: var(--secondary) !important;
+  box-shadow: 0 0 0 3px rgba(33,118,174,.15) !important;
+}
+.control-label { 
+  font-weight: 700 !important; 
+  font-size: 1.1rem !important; /* Plus gros */
+  color: var(--primary) !important; 
+  margin-bottom: .4rem !important; 
+}
+.irs--shiny .irs-bar  { background: var(--secondary) !important; }
+.irs--shiny .irs-handle { background: var(--primary) !important; border-color: var(--primary) !important; }
+.irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-single { background: var(--primary) !important; }
+
+/* ── Cases à cocher du camembert ── */
+#formes_visibles {
+  font-size: 0.95rem;
+  padding: 10px 15px;
+  background-color: white;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 15px;
+  width: 100%;
+}
+.checkbox-inline {
+  margin-right: 20px !important;
+}
+
+.nav-tabs { border-bottom: 2px solid var(--border) !important; background: var(--card) !important; padding: 0 .8rem !important; }
+.nav-tabs > li > a {
+  color: var(--muted) !important; font-weight: 500 !important; font-size: .87rem !important;
+  border: none !important; border-bottom: 2px solid transparent !important;
+  margin-bottom: -2px !important; padding: .5rem .85rem !important;
+  transition: all .18s !important; border-radius: 0 !important;
+}
+.nav-tabs > li.active > a, .nav-tabs > li > a:hover {
+  color: var(--primary) !important; font-weight: 700 !important;
+  border-bottom-color: var(--secondary) !important; background: transparent !important;
+}
+
+.value-box {
+  border-radius: var(--radius) !important; border: none !important;
+  box-shadow: var(--shadow) !important; margin-bottom: .6rem !important;
+  transition: transform .15s, box-shadow .15s !important;
+}
+.value-box:hover { transform: translateY(-2px) !important; box-shadow: 0 6px 22px rgba(26,58,92,.16) !important; }
+.value-box .value-box-value {
+  font-family: 'IBM Plex Mono', monospace !important;
+  font-size: 1.5rem !important; font-weight: 600 !important;
+}
+.value-box .value-box-caption {
+  font-size: .73rem !important; font-weight: 500 !important;
+  letter-spacing: .04em !important; text-transform: uppercase !important; opacity: .9 !important;
+}
+
+.chart-wrapper, .chart-stage {
+  background: var(--card) !important; border-radius: var(--radius) !important;
+  box-shadow: var(--shadow) !important; border: 1px solid var(--border) !important;
+}
+
+.dataTables_wrapper { font-size: .84rem !important; color: var(--primary) !important; }
+table.dataTable thead th {
+  background: var(--primary) !important; color: #fff !important;
+  font-weight: 600 !important; font-size: .81rem !important;
+  letter-spacing: .04em !important; border: none !important;
+}
+table.dataTable tbody tr:hover td { background: #e8f4fd !important; }
+table.dataTable tbody tr:nth-child(even) td { background: #f7fafd !important; }
+
+.info-card {
+  background: linear-gradient(135deg, #eaf4fb 0%, #e8f8f4 100%);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: .65rem .85rem; font-size: .81rem; line-height: 1.6;
+  color: #2d4a62; margin: .4rem 0;
+}
+.info-card strong { color: var(--primary); font-weight: 700; }
+
+.leaflet-container { min-height: 460px; border-radius: var(--radius); }
+.leaflet-popup-content-wrapper {
+  border-radius: var(--radius) !important;
+  font-family: 'IBM Plex Sans', sans-serif !important;
+  font-size: .84rem !important;
+  box-shadow: 0 4px 20px rgba(26,58,92,.18) !important;
+}
+.leaflet-popup-content b { color: var(--primary); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--light); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--secondary); }
+
+.plotly.html-widget, .html-widget { width: 100% !important; }
+```
+
+# Vue d'ensemble
+
+Column {.sidebar data-width=320}
+-----------------------------------------------------------------------
+
+### Filtres globaux
+
+```{r p1-filtre-dep}
+selectInput(
+  inputId   = "dep_glob",
+  label     = "Département A",
+  choices   = dep_choices,
+  selected  = "Tous",
+  selectize = TRUE
+)
+
+selectInput(
+  inputId   = "dep_glob2",
+  label     = "Département B (comparaison)",
+  choices   = dep_choices,
+  selected  = "Tous",
+  selectize = TRUE
+)
+```
+
+### À propos
+
+```{r p1-info}
+HTML('
+<div class="info-card">
+  <strong>Données FINESS</strong> — Fichier National des Établissements Sanitaires et Sociaux.<br><br>
+  Cette page présente une vue macro : volumes, répartition des activités et des formations déclarées auprès des ARS.
+</div>
+')
+```
+
+### Indicateurs clés
+
+```{r p1-vb-etab}
+renderValueBox({
+  dep <- input$dep_glob
+  n <- if (dep == "Tous") {
+    activites_clean |> distinct(nofinesset) |> nrow()
+  } else {
+    activites_clean |> filter(dep == !!dep) |> distinct(nofinesset) |> nrow()
+  }
+  valueBox(paste0("Etab actifs: ", format(n, big.mark = "\u202f")), "Établissements — avec activité", icon = "fa-hospital", color = "#1a3a5c")
+})
+```
+
+```{r p1-vb-autor}
+renderValueBox({
+  dep <- input$dep_glob
+  n <- if (dep == "Tous") nrow(activites_clean)
+       else activites_clean |> filter(dep == !!dep) |> nrow()
+  valueBox(paste0("Lignes aut.: ", format(n, big.mark = "\u202f")), "Autorisations d'activité — lignes", icon = "fa-file-text-o", color = "#2176ae")
+})
+```
+
+```{r p1-vb-act}
+renderValueBox({
+  dep <- input$dep_glob
+  n <- if (dep == "Tous") n_distinct(activites_clean$libactivite)
+       else activites_clean |> filter(dep == !!dep) |> pull(libactivite) |> n_distinct()
+  valueBox(paste0("Types distincts: ", n), "Types d'activités — diversité", icon = "fa-stethoscope", color = "#06a77d")
+})
+```
+
+```{r p1-vb-mat}
+renderValueBox({
+  dep <- input$dep_glob
+  n <- if (dep == "Tous") nrow(materiels_clean)
+       else materiels_clean |> filter(dep == !!dep) |> nrow()
+  valueBox(paste0("Total equips: ", format(n, big.mark = "\u202f")), "Équipements lourds — total", icon = "fa-cogs", color = "#f4a261")
+})
+```
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### 📊 Top activités
+
+```{r p1-top-activites}
+fluidRow(
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") activites_clean else activites_clean |> filter(dep == !!dep)
+
+      df_agg <- df |>
+        count(libactivite, sort = TRUE) |>
+        slice_head(n = 15) |>
+        mutate(
+          libactivite = str_trunc(libactivite, 50),
+          libactivite = forcats::fct_reorder(libactivite, n)
+        )
+
+      validate(need(nrow(df_agg) > 0, "Aucune donnée pour ce département."))
+
+      p <- ggplot(df_agg, aes(
+        x = libactivite, y = n,
+        text = paste0("<b>", libactivite, "</b><br>",
+                      format(n, big.mark = "\u202f"), " autorisations")
+      )) +
+        geom_col(fill = PAL$secondary, width = .75) +
+        geom_text(aes(label = format(n, big.mark = "\u202f")),
+                  hjust = -.1, size = 3, colour = PAL$primary) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb autorisations",
+          title = label_dep,
+          subtitle = "Top 15 des activités autorisées"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"), margin = list(l = 10))
+    })
+  ),
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob2
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") activites_clean else activites_clean |> filter(dep == !!dep)
+
+      df_agg <- df |>
+        count(libactivite, sort = TRUE) |>
+        slice_head(n = 15) |>
+        mutate(
+          libactivite = str_trunc(libactivite, 50),
+          libactivite = forcats::fct_reorder(libactivite, n)
+        )
+
+      validate(need(nrow(df_agg) > 0, "Aucune donnée pour ce département."))
+
+      p <- ggplot(df_agg, aes(
+        x = libactivite, y = n,
+        text = paste0("<b>", libactivite, "</b><br>",
+                      format(n, big.mark = "\u202f"), " autorisations")
+      )) +
+        geom_col(fill = PAL$warn, width = .75) +
+        geom_text(aes(label = format(n, big.mark = "\u202f")),
+                  hjust = -.1, size = 3, colour = PAL$primary) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb autorisations",
+          title = label_dep,
+          subtitle = "Top 15 des activités autorisées"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"), margin = list(l = 10))
+    })
+  )
+)
+```
+
+### 🎓 Répartition des formations
+
+```{r p1-formations}
+fluidRow(
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") disciplines_clean else disciplines_clean |> filter(dep == !!dep)
+
+      df_agg <- df |>
+        count(libde, sort = TRUE) |>
+        slice_head(n = 15) |>
+        mutate(
+          libde = str_trunc(libde, 50),
+          libde = forcats::fct_reorder(libde, n)
+        )
+
+      validate(need(nrow(df_agg) > 0, "Aucune donnée de formation pour ce département."))
+
+      p <- ggplot(df_agg, aes(
+        x = libde, y = n, fill = n,
+        text = paste0("<b>", libde, "</b><br>", format(n, big.mark = "\u202f"), " lignes de formation")
+      )) +
+        geom_col(width = .78) +
+        scale_fill_gradient(low = PAL$accent, high = PAL$primary, guide = "none") +
+        geom_text(aes(label = n), hjust = -.15, size = 3, colour = PAL$primary) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb de lignes",
+          title = label_dep,
+          subtitle = "Top 15 des disciplines de formation"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"))
+    })
+  ),
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob2
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") disciplines_clean else disciplines_clean |> filter(dep == !!dep)
+
+      df_agg <- df |>
+        count(libde, sort = TRUE) |>
+        slice_head(n = 15) |>
+        mutate(
+          libde = str_trunc(libde, 50),
+          libde = forcats::fct_reorder(libde, n)
+        )
+
+      validate(need(nrow(df_agg) > 0, "Aucune donnée de formation pour ce département."))
+
+      p <- ggplot(df_agg, aes(
+        x = libde, y = n, fill = n,
+        text = paste0("<b>", libde, "</b><br>", format(n, big.mark = "\u202f"), " lignes de formation")
+      )) +
+        geom_col(width = .78) +
+        scale_fill_gradient(low = "#f4a261", high = "#c1121f", guide = "none") +
+        geom_text(aes(label = n), hjust = -.15, size = 3, colour = PAL$primary) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb de lignes",
+          title = label_dep,
+          subtitle = "Top 15 des disciplines de formation"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"))
+    })
+  )
+)
+```
+
+### 🔬 Équipements lourds
+
+```{r p1-materiels}
+fluidRow(
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") materiels_clean else materiels_clean |> filter(dep == !!dep)
+
+      validate(need(nrow(df) > 0, "Aucun équipement lourd pour ce département."))
+
+      df_agg <- df |>
+        count(lib_eml_court, sort = TRUE) |>
+        mutate(lib_eml_court = forcats::fct_reorder(lib_eml_court, n))
+
+      p <- ggplot(df_agg, aes(
+        x = lib_eml_court, y = n, fill = lib_eml_court,
+        text = paste0("<b>", lib_eml_court, "</b><br>", n, " appareils recensés")
+      )) +
+        geom_col(width = .72, show.legend = FALSE) +
+        geom_text(aes(label = n), hjust = -.2, size = 3.5, colour = PAL$primary) +
+        scale_fill_manual(values = colorRampPalette(
+          c("#00b4d8", "#2176ae", "#1a3a5c"))(nrow(df_agg))) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb d'appareils",
+          title = label_dep,
+          subtitle = "Répartition des matériels lourds"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"))
+    })
+  ),
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob2
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") materiels_clean else materiels_clean |> filter(dep == !!dep)
+
+      validate(need(nrow(df) > 0, "Aucun équipement lourd pour ce département."))
+
+      df_agg <- df |>
+        count(lib_eml_court, sort = TRUE) |>
+        mutate(lib_eml_court = forcats::fct_reorder(lib_eml_court, n))
+
+      p <- ggplot(df_agg, aes(
+        x = lib_eml_court, y = n, fill = lib_eml_court,
+        text = paste0("<b>", lib_eml_court, "</b><br>", n, " appareils recensés")
+      )) +
+        geom_col(width = .72, show.legend = FALSE) +
+        geom_text(aes(label = n), hjust = -.2, size = 3.5, colour = PAL$primary) +
+        scale_fill_manual(values = colorRampPalette(
+          c("#f4a261", "#c1121f", "#6b0f1a"))(nrow(df_agg))) +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, .35))) +
+        labs(
+          x = NULL, y = "Nb d'appareils",
+          title = label_dep,
+          subtitle = "Répartition des matériels lourds"
+        ) +
+        theme_finess(base_size = 10)
+
+      ggplotly(p, tooltip = "text") |>
+        layout(font = list(family = "IBM Plex Sans"))
+    })
+  )
+)
+```
+
+### 🏥 Formes d'hospitalisation
+
+```{r p1-filtre-formes}
+# Cases à cocher affichées en ligne au-dessus des camemberts, agissant comme légende globale
+formes_possibles <- activites_clean |>
+  filter(!is.na(libforme), libforme != "", libforme != "Pas de forme") |>
+  mutate(libforme = stringr::str_trunc(libforme, 45)) |>
+  count(libforme, sort = TRUE) |>
+  pull(libforme)
+
+checkboxGroupInput(
+  inputId = "formes_visibles",
+  label = "Désélectionnez des catégories pour les regrouper dans « Autres » :",
+  choices = formes_possibles,
+  selected = formes_possibles,
+  inline = TRUE
+)
+```
+
+```{r p1-formes}
+fluidRow(
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") activites_clean else activites_clean |> filter(dep == !!dep)
+      
+      # Récupération sécurisée des formes visibles
+      visibles <- if(is.null(input$formes_visibles)) formes_possibles else input$formes_visibles
+
+      df_agg <- df |>
+        filter(!is.na(libforme), libforme != "", libforme != "Pas de forme") |>
+        mutate(libforme = str_trunc(libforme, 45)) |>
+        count(libforme, sort = TRUE) |>
+        mutate(
+          libforme = if_else(libforme %in% visibles, libforme, "Autres")
+        ) |>
+        group_by(libforme) |>
+        summarise(n = sum(n), .groups = 'drop')
+
+      validate(need(nrow(df_agg) > 0, "Aucune forme d'hospitalisation disponible."))
+
+      plot_ly(
+        df_agg,
+        labels  = ~libforme, values = ~n,
+        type    = "pie", hole = 0.45,
+        textinfo = "percent",
+        hovertemplate = "<b>%{label}</b><br>%{value} aut. (%{percent})<extra></extra>",
+        marker = list(colors = colorRampPalette(
+          c(PAL$accent, PAL$secondary, PAL$primary, PAL$success, PAL$warn, "#aaaaaa")
+        )(nrow(df_agg)),
+        line = list(color = "white", width = 1.5))
+      ) |>
+        layout(
+          title  = list(text = label_dep, font = list(size = 13)),
+          font   = list(family = "IBM Plex Sans"),
+          showlegend = FALSE # Légende désactivée (gérée par les cases au-dessus)
+        )
+    })
+  ),
+  column(6,
+    renderPlotly({
+      dep <- input$dep_glob2
+      label_dep <- if (dep == "Tous") "Tous les départements" else names(dep_choices)[dep_choices == dep]
+
+      df <- if (dep == "Tous") activites_clean else activites_clean |> filter(dep == !!dep)
+      
+      # Récupération sécurisée des formes visibles
+      visibles <- if(is.null(input$formes_visibles)) formes_possibles else input$formes_visibles
+
+      df_agg <- df |>
+        filter(!is.na(libforme), libforme != "", libforme != "Pas de forme") |>
+        mutate(libforme = str_trunc(libforme, 45)) |>
+        count(libforme, sort = TRUE) |>
+        mutate(
+          libforme = if_else(libforme %in% visibles, libforme, "Autres")
+        ) |>
+        group_by(libforme) |>
+        summarise(n = sum(n), .groups = 'drop')
+
+      validate(need(nrow(df_agg) > 0, "Aucune forme d'hospitalisation disponible."))
+
+      plot_ly(
+        df_agg,
+        labels  = ~libforme, values = ~n,
+        type    = "pie", hole = 0.45,
+        textinfo = "percent",
+        hovertemplate = "<b>%{label}</b><br>%{value} aut. (%{percent})<extra></extra>",
+        marker = list(colors = colorRampPalette(
+          c(PAL$warn, PAL$danger, "#6b0f1a", "#c1121f", PAL$muted, "#aaaaaa")
+        )(nrow(df_agg)),
+        line = list(color = "white", width = 1.5))
+      ) |>
+        layout(
+          title  = list(text = label_dep, font = list(size = 13)),
+          font   = list(family = "IBM Plex Sans"),
+          showlegend = FALSE # Légende désactivée (gérée par les cases au-dessus)
+        )
+    })
+  )
+)
+```
+
+# Cartographie
+
+Column {.sidebar data-width=320}
+-----------------------------------------------------------------------
+
+### Filtres cartographiques
+
+```{r p2-filtres}
+map_metric_choices <- list(
+  "Nombre d'etablissements" = "n_etab",
+  "Activites/100 etablissements" = "n_act_per_100",
+  "Disciplines/100 etablissements" = "n_de_per_100",
+  "Materiels lourds/100 etablissements" = "n_eml_per_100",
+  "Indice composite" = "score_acces"
+)
+
+selectInput(
+  inputId = "dep_select_carto",
+  label = "Selection du departement",
+  choices = dep_choices,
+  selected = "Tous",
+  selectize = TRUE
+)
+
+selectInput(
+  inputId = "map_metric_carto",
+  label = "Indicateur cartographique",
+  choices = map_metric_choices,
+  selected = "n_act_per_100", # Changé pour afficher la densité par défaut
+  selectize = FALSE
+)
+
+HTML(paste0(
+  "<div class='info-card'>",
+  "<b>Lecture :</b> changer d'indicateur pour comparer le volume brut et l'intensite d'offre.<br><br>",
+  "Le filtre departement permet de focaliser les analyses detaillees.",
+  "</div>"
+))
+```
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### Carte departementale
+
+```{r p2-carte}
+renderLeaflet({
+  metric_id <- input$map_metric_carto
+  metric_label <- names(map_metric_choices)[match(metric_id, map_metric_choices)]
+
+  top_themes_tbl <- tfidf_dep |>
+    group_by(dep) |>
+    slice_max(order_by = tf_idf, n = 3, with_ties = FALSE) |>
+    summarise(top_themes = paste(word_norm, collapse = ", "), .groups = "drop")
+
+  dep_geo_carto <- dep_geo |>
+    mutate(
+      departement = dep,
+      libdepartement = nom,
+      n_etab = n_etab_total,
+      n_act_per_100 = if_else(n_etab > 0, 100 * n_autorisations / n_etab, NA_real_),
+      n_de_per_100 = if_else(n_etab > 0, 100 * n_formations / n_etab, NA_real_),
+      n_eml_per_100 = if_else(n_etab > 0, 100 * n_mat_total / n_etab, NA_real_),
+      score_acces = score_offre
+    ) |>
+    left_join(top_themes_tbl, by = c("dep" = "dep")) |>
+    mutate(top_themes = replace_na(top_themes, "Non disponible"))
+
+  d <- if (input$dep_select_carto == "Tous") {
+    dep_geo_carto
+  } else {
+    dep_geo_carto |> filter(departement == input$dep_select_carto)
+  }
+
+  validate(need(nrow(d) > 0, "Aucune geometrie disponible pour ce departement."))
+
+  d <- d |>
+    mutate(metric_value = .data[[metric_id]])
+
+  pal <- colorNumeric(
+    palette = "YlGnBu",
+    domain = dep_geo_carto[[metric_id]],
+    na.color = "#f0f0f0"
+  )
+
+  leaflet(d) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    addPolygons(
+      fillColor = ~pal(metric_value),
+      weight = 1,
+      color = "#4f5d75",
+      opacity = 1,
+      fillOpacity = 0.75,
+      smoothFactor = 0.2,
+      label = ~paste0(
+        departement, " - ", libdepartement,
+        " | ", metric_label, " : ", scales::number(metric_value, accuracy = 0.1)
+      ),
+      popup = ~paste0(
+        "<b>", departement, " - ", libdepartement, "</b><br>",
+        "Etablissements: ", format(n_etab, big.mark = " "), "<br><br>",
+        "Activites/100 etab: ", scales::number(n_act_per_100, accuracy = 0.1), "<br>",
+        "Disciplines/100 etab: ", scales::number(n_de_per_100, accuracy = 0.1), "<br>",
+        "Materiels lourds/100 etab: ", scales::number(n_eml_per_100, accuracy = 0.1), "<br>",
+        "Indice composite: ", scales::number(score_acces, accuracy = 0.1), "<br><br>",
+        "<b>Themes dominants:</b><br>",
+        htmltools::htmlEscape(top_themes)
+      )
+    ) |>
+    addLegend(
+      "bottomright",
+      pal = pal,
+      values = dep_geo_carto[[metric_id]],
+      title = metric_label,
+      opacity = 0.85
+    )
+})
+```
+
+### Profil territorial
+
+```{r p2-profil-territorial}
+renderPlotly({
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    mutate(
+      departement = dep,
+      libdepartement = nom,
+      n_etab = n_etab_total,
+      n_act_per_100 = if_else(n_etab > 0, 100 * n_autorisations / n_etab, NA_real_),
+      n_de_per_100 = if_else(n_etab > 0, 100 * n_formations / n_etab, NA_real_),
+      n_eml_per_100 = if_else(n_etab > 0, 100 * n_mat_total / n_etab, NA_real_),
+      score_acces = score_offre
+    ) |>
+    filter(n_etab > 0)
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |>
+      mutate(selection = "Autres")
+  } else {
+    df |>
+      mutate(selection = if_else(departement == input$dep_select_carto, "Departement selectionne", "Autres"))
+  }
+
+  p <- ggplot(
+    df,
+    aes(
+      x = n_etab,
+      y = n_act_per_100,
+      size = n_eml_per_100,
+      color = selection,
+      text = paste0(
+        departement, " - ", libdepartement,
+        "<br>Etablissements: ", format(n_etab, big.mark = " "),
+        "<br>Activites/100: ", scales::number(n_act_per_100, accuracy = 0.1),
+        "<br>Materiels lourds/100: ", scales::number(n_eml_per_100, accuracy = 0.1),
+        "<br>Indice: ", scales::number(score_acces, accuracy = 0.1)
+      )
+    )
+  ) +
+    geom_point(alpha = 0.85) +
+    scale_color_manual(values = c("Autres" = "#6c757d", "Departement selectionne" = "#1f77b4")) +
+    scale_size_continuous(range = c(3, 14)) +
+    labs(
+      x = "Nombre d'etablissements",
+      y = "Activites de soin pour 100 etablissements",
+      size = "Materiels lourds / 100",
+      color = NULL,
+      title = "Volume vs intensite de l'offre"
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = "text")
+})
+```
+
+### Comparaison multi-indicateurs
+
+```{r p2-comparaison-multi}
+renderPlotly({
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    mutate(
+      departement = dep,
+      libdepartement = nom,
+      n_etab = n_etab_total,
+      n_act_per_100 = if_else(n_etab > 0, 100 * n_autorisations / n_etab, NA_real_),
+      n_de_per_100 = if_else(n_etab > 0, 100 * n_formations / n_etab, NA_real_),
+      n_eml_per_100 = if_else(n_etab > 0, 100 * n_mat_total / n_etab, NA_real_),
+      score_acces = score_offre
+    ) |>
+    filter(n_etab > 0)
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |>
+      arrange(desc(score_acces)) |>
+      slice_head(n = 20)
+  } else {
+    df |> filter(departement == input$dep_select_carto)
+  }
+
+  validate(need(nrow(df) > 0, "Pas de departement a afficher."))
+
+  heat <- df |>
+    transmute(
+      departement = paste0(departement, " - ", libdepartement),
+      `Activites/100` = n_act_per_100,
+      `Disciplines/100` = n_de_per_100,
+      `Materiels/100` = n_eml_per_100,
+      `Indice acces` = score_acces
+    ) |>
+    pivot_longer(-departement, names_to = "indicateur", values_to = "valeur") |>
+    mutate(
+      valeur_arrondie = round(valeur, 1),
+      # Couleur dynamique du texte selon le fond (pour rester lisible)
+      text_color = if_else(valeur > max(valeur, na.rm=TRUE)*0.5, "white", "black")
+    )
+
+  p <- ggplot(heat, aes(x = indicateur, y = forcats::fct_rev(departement), fill = valeur)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = valeur_arrondie, color = text_color), size = 3.5) +
+    scale_fill_viridis_c(option = "C", guide = "none") + # Légende couleur supprimée pour clarté
+    scale_color_identity() +
+    labs(x = NULL, y = NULL, title = "Lecture comparative des départements") +
+    theme_minimal(base_size = 14) + # Textes plus gros
+    theme(
+      panel.grid = element_blank(), 
+      axis.text.x = element_text(angle = 15, hjust = 1, face = "bold", size = 11),
+      axis.text.y = element_text(size = 11)
+    )
+
+  ggplotly(p)
+})
+```
+
+### Classement de l'indicateur choisi
+
+```{r p2-classement-indicateur}
+renderPlotly({
+  metric_id <- input$map_metric_carto
+  metric_label <- names(map_metric_choices)[match(metric_id, map_metric_choices)]
+
+  df <- dep_geo |>
+    st_drop_geometry() |>
+    mutate(
+      departement = dep,
+      libdepartement = nom,
+      n_etab = n_etab_total,
+      n_act_per_100 = if_else(n_etab > 0, 100 * n_autorisations / n_etab, NA_real_),
+      n_de_per_100 = if_else(n_etab > 0, 100 * n_formations / n_etab, NA_real_),
+      n_eml_per_100 = if_else(n_etab > 0, 100 * n_mat_total / n_etab, NA_real_),
+      score_acces = score_offre
+    ) |>
+    filter(n_etab > 0) |>
+    transmute(
+      departement = paste0(departement, " - ", libdepartement),
+      metric_value = .data[[metric_id]]
+    ) |>
+    arrange(desc(metric_value))
+
+  df <- if (input$dep_select_carto == "Tous") {
+    df |> slice_head(n = 20)
+  } else {
+    df |>
+      mutate(selection = if_else(str_detect(departement, paste0("^", input$dep_select_carto, " - ")), "Selection", "Autres"))
+  }
+
+  p <- ggplot(df, aes(x = forcats::fct_reorder(departement, metric_value), y = metric_value)) +
+    geom_col(fill = "#457b9d") +
+    coord_flip() +
+    labs(x = NULL, y = metric_label, title = paste0("Classement - ", metric_label)) +
+    theme_minimal(base_size = 12)
+
+  ggplotly(p, tooltip = c("x", "y"))
+})
+```
+
+# Analyse textuelle
+
+Column {.sidebar data-width=320}
+-----------------------------------------------------------------------
+
+### Filtres textuels
+
+```{r p3-filtres}
+selectInput(
+  inputId   = "dep_text",
+  label     = "Département",
+  choices   = dep_choices,
+  selected  = "Tous",
+  selectize = TRUE
+)
+
+sliderInput(
+  inputId = "top_n_text",
+  label   = "Nombre de termes affichés",
+  min = 10, max = 80, value = 30, step = 5
+)
+```
+
+### Méthode
+
+```{r p3-info}
+HTML('
+<div class="info-card">
+  <strong>Source</strong> — Noms d\'établissements géographiques (<em>rs</em>) issus du fichier établissements FINESS.<br><br>
+  <strong>Traitement</strong><br>
+  1. Nettoyage (apostrophes, accents)<br>
+  2. Tokenisation en mots<br>
+  3. Suppression stop-words FR + termes métier<br>
+  4. Calcul TF-IDF par département<br><br>
+  <strong>TF-IDF</strong> — Score élevé = terme rare au national mais fréquent localement.
+</div>
+')
+```
+
+### Volume textuel
+
+```{r p3-vb-tokens}
+renderValueBox({
+  dep <- input$dep_text
+  n <- if (dep == "Tous") nrow(tokens_etab)
+       else tokens_etab |> filter(dep == !!dep) |> nrow()
+  valueBox(paste0("Vol. tokens: ", format(n, big.mark = "\u202f")), "Tokens analysés — volume", icon = "fa-font", color = "#1a3a5c")
+})
+```
+
+```{r p3-vb-uniq}
+renderValueBox({
+  dep <- input$dep_text
+  n <- if (dep == "Tous") n_distinct(tokens_etab$word_norm)
+       else tokens_etab |> filter(dep == !!dep) |> pull(word_norm) |> n_distinct()
+  valueBox(paste0("Vocabulaire: ", format(n, big.mark = "\u202f")), "Termes uniques — vocabulaire", icon = "fa-tags", color = "#00b4d8")
+})
+```
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### ☁️ Nuage de mots
+
+```{r p3-wordcloud}
+renderPlot({
+  top_n <- max(1L, as.integer(input$top_n_text %||% 30L))
+  dep <- input$dep_text
+
+  filtered_tokens <- if (dep == "Tous") {
+    tokens_etab
+  } else {
+    tokens_etab |> filter(dep == !!dep)
+  }
+
+  wc_all <- filtered_tokens |>
+    mutate(
+      word_cloud = dplyr::case_when(
+        word_norm %in% c("pharmacie", "pharmacies", "officine", "officines") ~ "pharmacie",
+        TRUE ~ word_norm
+      )
+    ) |>
+    count(word_cloud, sort = TRUE, name = "n") |>
+    rename(word_norm = word_cloud)
+
+  wc <- wc_all |>
+    slice_head(n = top_n)
+
+  if ("pharmacie" %in% wc_all$word_norm && !("pharmacie" %in% wc$word_norm)) {
+    wc <- wc |>
+      slice_head(n = max(1, top_n - 1)) |>
+      bind_rows(wc_all |> filter(word_norm == "pharmacie"))
+  }
+
+  wc <- wc |>
+    arrange(desc(n)) |>
+    mutate(freq_plot = log1p(n))
+
+  validate(need(nrow(wc) > 0, "Aucun terme disponible pour ce filtre."))
+
+  set.seed(123)
+  par(mar = c(0, 0, 0, 0), bg = "white")
+
+  draw_wc_once <- function(scale_max, scale_min = 0.65) {
+    warned <- FALSE
+    withCallingHandlers(
+      {
+        wordcloud::wordcloud(
+          words = wc$word_norm,
+          freq = wc$freq_plot,
+          scale = c(scale_max, scale_min),
+          min.freq = 1,
+          random.order = FALSE,
+          rot.per = 0,
+          fixed.asp = FALSE,
+          colors = colorRampPalette(c("#1a3a5c", "#2176ae", "#00b4d8", "#06a77d", "#f4a261"))(max(8, nrow(wc)))
+        )
+      }, 
+      warning = function(w) {
+        warned <<- TRUE
+        invokeRestart("muffleWarning")
+      }
+    )
+    warned
+  }
+
+  warned <- TRUE
+  for (s in c(3.0, 2.6, 2.3, 2.0, 1.8)) {
+    warned <- draw_wc_once(scale_max = s)
+    if (!warned) break
+    plot.new()
+  }
+}, res = 96)
+```
+
+### 📊 Fréquence & 🏥 Mots-clés établissements
+
+```{r p3-freq-motscles}
+renderPlotly({
+  top_n <- max(1L, as.integer(input$top_n_text %||% 30L))
+  dep   <- input$dep_text
+
+  df_tokens <- if (dep == "Tous") tokens_etab else tokens_etab |> filter(dep == !!dep)
+
+  df_freq <- df_tokens |>
+    count(word_norm, sort = TRUE) |>
+    slice_head(n = top_n) |>
+    mutate(word_norm = forcats::fct_reorder(word_norm, n))
+
+  validate(need(nrow(df_freq) > 0, "Aucun terme disponible."))
+
+  p_freq <- ggplot(df_freq, aes(
+    x = word_norm, y = n,
+    text = paste0("<b>", word_norm, "</b><br>",
+                  format(n, big.mark = "\u202f"), " occurrences")
+  )) +
+    geom_col(fill = PAL$secondary, width = .78) +
+    geom_text(aes(label = n), hjust = -.1, size = 3, colour = PAL$muted) +
+    coord_flip() +
+    scale_y_continuous(expand = expansion(mult = c(0, .15))) +
+    labs(
+      x = NULL, y = "Occurrences",
+      title = "Frequence des termes",
+      subtitle = "Stop-words metier et generiques supprimes"
+    ) +
+    theme_finess()
+
+  df_etab <- if (dep == "Tous") corpus_etab else corpus_etab |> filter(dep == !!dep)
+
+  validate(need(nrow(df_etab) > 0, "Aucun établissement disponible pour ce filtre."))
+
+  df_cat <- motifs_struct |>
+    rowwise() |>
+    mutate(
+      n = sum(stringr::str_detect(normalize_text(df_etab$text_clean), stringr::regex(pattern))),
+      pct = 100 * n / nrow(df_etab)
+    ) |>
+    ungroup() |>
+    filter(n > 0) |>
+    arrange(desc(n)) |>
+    mutate(categorie = forcats::fct_reorder(categorie, n))
+
+  validate(need(nrow(df_cat) > 0, "Aucun mot-cle structurel detecte."))
+
+  p_motscles <- ggplot(df_cat, aes(
+    x = categorie, y = n,
+    text = paste0("<b>", categorie, "</b><br>",
+                  format(n, big.mark = "\u202f"), " etablissements<br>",
+                  "Soit ", scales::number(pct, accuracy = .1), " % de la selection")
+  )) +
+    geom_col(fill = PAL$success, width = .78) +
+    geom_text(aes(label = n), hjust = -.12, size = 3, colour = PAL$muted) +
+    coord_flip() +
+    scale_y_continuous(expand = expansion(mult = c(0, .15))) +
+    labs(
+      x = NULL, y = "Occurrences",
+      title = "Mots-cles etablissements",
+      subtitle = "Hopital, clinique, SSIAD/SSAD..."
+    ) +
+    theme_finess()
+
+  subplot(
+    ggplotly(p_freq, tooltip = "text"),
+    ggplotly(p_motscles, tooltip = "text"),
+    nrows = 1,
+    widths = c(0.5, 0.5),
+    margin = 0.05,
+    shareY = FALSE,
+    titleX = TRUE,
+    titleY = TRUE
+  ) |>
+    layout(font = list(family = "IBM Plex Sans"), showlegend = FALSE)
+})
+```
+
+### 📚 Glossaire unifié
+
+```{r p3-glossaire-unifie}
+renderDT({
+  dep <- input$dep_text
+
+  df_etab <- if (dep == "Tous") corpus_etab else corpus_etab |> filter(dep == !!dep)
+  df_tokens <- if (dep == "Tous") tokens_etab else tokens_etab |> filter(dep == !!dep)
+
+  validate(need(nrow(df_etab) > 0, "Aucun établissement disponible pour ce filtre."))
+
+  gloss_struct <- motifs_struct |>
+    rowwise() |>
+    mutate(
+      `Nb etablissements` = sum(stringr::str_detect(normalize_text(df_etab$text_clean), stringr::regex(pattern))),
+      `Part (%)` = round(100 * `Nb etablissements` / nrow(df_etab), 1)
+    ) |>
+    ungroup() |>
+    filter(`Nb etablissements` > 0) |>
+    transmute(
+      Type = "Mot-cle structurel",
+      Entree = categorie,
+      Explication = explication,
+      `Motif detecte (regex)` = pattern,
+      `Nb etablissements`,
+      `Part (%)`,
+      Occurrences = as.integer(NA)
+    )
+
+  gloss_termes <- df_tokens |>
+    count(word_norm, sort = TRUE, name = "Occurrences") |>
+    left_join(lexique_termes, by = "word_norm") |>
+    filter(!is.na(explication)) |>
+    transmute(
+      Type = "Terme metier",
+      Entree = word_norm,
+      Explication = explication,
+      `Motif detecte (regex)` = as.character(NA),
+      `Nb etablissements` = as.integer(NA),
+      `Part (%)` = as.numeric(NA),
+      Occurrences
+    )
+
+  gloss_unifie <- bind_rows(gloss_struct, gloss_termes) |>
+    arrange(desc(replace_na(`Nb etablissements`, 0L)), desc(replace_na(Occurrences, 0L)), Entree)
+
+  validate(need(nrow(gloss_unifie) > 0, "Aucune entree de glossaire dans cette selection."))
+
+  datatable(
+    gloss_unifie,
+    rownames = FALSE,
+    class = "stripe hover compact",
+    options = list(pageLength = 15, scrollX = TRUE)
+  )
+})
+```
+
+### 🎯 TF-IDF départemental
+
+```{r p3-tfidf}
+renderPlotly({
+  top_n <- max(1L, as.integer(input$top_n_text %||% 30L))
+
+  validate(need(
+    input$dep_text != "Tous",
+    "👆 Sélectionnez un département pour afficher ses termes distinctifs (TF-IDF)."
+  ))
+
+  dep <- input$dep_text
+
+  df <- tfidf_dep |>
+    filter(dep == !!dep) |>
+    slice_max(order_by = tf_idf, n = top_n, with_ties = FALSE) |>
+    arrange(tf_idf) |>
+    mutate(word_norm = forcats::fct_reorder(word_norm, tf_idf))
+
+  validate(need(nrow(df) > 0, "Aucun terme TF-IDF pour ce département."))
+
+  p <- ggplot(df, aes(
+    x = word_norm, y = tf_idf,
+    text = paste0("<b>", word_norm, "</b><br>",
+                  "TF-IDF : ", scales::number(tf_idf, accuracy = .0001), "<br>",
+                  "Occurrences : ", n)
+  )) +
+    geom_col(fill = "#6a0572", width = .78) +
+    geom_text(aes(label = scales::number(tf_idf, accuracy = .001)),
+              hjust = -.12, size = 2.8, colour = "#6a0572") +
+    coord_flip() +
+    scale_y_continuous(expand = expansion(mult = c(0, .2))) +
+    labs(
+      x = NULL, y = "Score TF-IDF",
+      title = paste0("Termes distinctifs — ", dep),
+      subtitle = "Plus le score est élevé, plus le terme est caractéristique de ce département"
+    ) +
+    theme_finess()
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### 🌐 Diversité sémantique
+
+```{r p3-diversite}
+renderPlotly({
+  df <- dep_geo |>
+    sf::st_drop_geometry() |>
+    left_join(div_semantique, by = "dep") |>
+    filter(!is.na(entropie)) |>
+    mutate(
+      sel = if (input$dep_text != "Tous")
+        if_else(dep == input$dep_text, "Sélection", "Autres")
+      else "Tous",
+      label = paste0(dep, " — ", nom)
+    )
+
+  p <- ggplot(df, aes(
+    x = n_termes_uniq, y = entropie, color = sel,
+    text = paste0(
+      "<b>", dep, " — ", nom, "</b><br>",
+      "Entropie sémantique : ", scales::number(entropie, accuracy = .01), "<br>",
+      "Termes uniques : ", format(n_termes_uniq, big.mark = "\u202f")
+    )
+  )) +
+    geom_point(size = 3.5, alpha = .82) +
+    scale_color_manual(
+      values = c("Tous" = PAL$secondary, "Autres" = "#a8c4d8", "Sélection" = PAL$warn),
+      guide = "none"
+    ) +
+    labs(
+      x = "Nombre de termes uniques par département",
+      y = "Entropie sémantique (Shannon)",
+      title = "Diversité sémantique des noms d'établissements",
+      subtitle = "Entropie élevée = offre thématiquement variée"
+    ) +
+    theme_finess()
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+# Temporalité
+
+Column {.sidebar data-width=320}
+-----------------------------------------------------------------------
+
+### Filtres temporels
+
+```{r p4-filtres}
+selectInput(
+  inputId   = "activite_timeline",
+  label     = "Type d'activité",
+  choices   = c("Toutes" = "Toutes", setNames(top_activites, str_trunc(top_activites, 55))),
+  selected  = "Toutes",
+  selectize = TRUE
+)
+
+sliderInput(
+  inputId = "periode",
+  label   = "Période",
+  min = 1970, max = 2025,
+  value = c(1990, 2025), step = 1,
+  sep = ""
+)
+
+selectInput(
+  inputId   = "dep_tempo",
+  label     = "Département",
+  choices   = dep_choices,
+  selected  = "Tous",
+  selectize = TRUE
+)
+```
+
+### À propos
+
+```{r p4-info}
+HTML('
+<div class="info-card">
+  <strong>dateautor</strong> — Date d\'autorisation initiale accordée par l\'ARS.<br><br>
+  <strong>datemeo</strong> — Date de mise en œuvre effective (ouverture réelle).<br><br>
+  <strong>Lecture</strong> — Un pic correspond à une vague de création ou de renouvellement d\'autorisations.
+</div>
+')
+```
+
+### Statistiques période
+
+```{r p4-vb-n}
+renderValueBox({
+  df <- activites_clean |>
+    filter(!is.na(annee_autr), annee_autr >= input$periode[1], annee_autr <= input$periode[2])
+  if (input$dep_tempo != "Tous") df <- df |> filter(dep == input$dep_tempo)
+  if (input$activite_timeline != "Toutes") df <- df |> filter(libactivite == input$activite_timeline)
+  valueBox(paste0("Aut. periode: ", format(nrow(df), big.mark = "\u202f")), "Autorisations sur la période — volume", icon = "fa-calendar", color = "#1a3a5c")
+})
+```
+
+```{r p4-vb-annee-pic}
+renderValueBox({
+  df <- activites_clean |>
+    filter(!is.na(annee_autr), annee_autr >= input$periode[1], annee_autr <= input$periode[2])
+  if (input$dep_tempo != "Tous") df <- df |> filter(dep == input$dep_tempo)
+  if (input$activite_timeline != "Toutes") df <- df |> filter(libactivite == input$activite_timeline)
+  annee_pic <- df |> count(annee_autr) |> slice_max(n, n = 1) |> pull(annee_autr)
+  valueBox(paste0("Pic annee: ", annee_pic[1]), "Année record — pic", icon = "fa-star", color = "#f4a261")
+})
+```
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### 📈 Évolution annuelle
+
+```{r p4-timeline}
+renderPlotly({
+  df <- activites_clean |>
+    filter(!is.na(annee_autr),
+           annee_autr >= input$periode[1],
+           annee_autr <= input$periode[2])
+
+  if (input$dep_tempo   != "Tous")   df <- df |> filter(dep == input$dep_tempo)
+  if (input$activite_timeline != "Toutes")
+    df <- df |> filter(libactivite == input$activite_timeline)
+
+  validate(need(nrow(df) > 0, "Aucune donnée sur cette période / cette sélection."))
+
+  df_agg <- df |> count(annee_autr, name = "n")
+
+  p <- ggplot(df_agg, aes(x = annee_autr, y = n,
+    text = paste0("Année : <b>", annee_autr, "</b><br>",
+                  format(n, big.mark = "\u202f"), " autorisations"))) +
+    geom_area(fill = PAL$secondary, alpha = .18) +
+    geom_line(color = PAL$secondary, linewidth = 1.1) +
+    geom_point(color = PAL$primary, size = 2, alpha = .7) +
+    scale_y_continuous(labels = label_number(big.mark = "\u202f")) +
+    labs(
+      x = "Année d'autorisation", y = "Nombre d'autorisations",
+      title = "Évolution annuelle des autorisations d'activité",
+      subtitle = "Chaque point = total des autorisations accordées dans l'année"
+    ) +
+    theme_finess()
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### 📊 Top activités par décennie
+
+```{r p4-decennie}
+renderPlotly({
+  df <- activites_clean |>
+    filter(!is.na(annee_autr),
+           annee_autr >= input$periode[1],
+           annee_autr <= input$periode[2])
+
+  if (input$dep_tempo != "Tous") df <- df |> filter(dep == input$dep_tempo)
+
+  df_dec <- df |>
+    mutate(decennie = paste0(floor(annee_autr / 10) * 10, "s")) |>
+    count(lib_act_court, decennie, name = "n") |>
+    group_by(lib_act_court) |>
+    filter(sum(n) >= 10) |>
+    ungroup()
+
+  validate(need(nrow(df_dec) > 0, "Pas assez de données pour cette sélection."))
+
+  top12 <- df_dec |> group_by(lib_act_court) |> summarise(tot = sum(n)) |>
+    slice_max(tot, n = 12) |> pull(lib_act_court)
+
+  df_dec <- df_dec |> filter(lib_act_court %in% top12)
+
+  p <- ggplot(df_dec, aes(
+    x = decennie, y = lib_act_court, fill = n,
+    text = paste0("<b>", lib_act_court, "</b><br>",
+                  decennie, " : ", format(n, big.mark = "\u202f"), " aut.")
+  )) +
+    geom_tile(color = "white", linewidth = .35) +
+    scale_fill_gradient(low = "#dceefb", high = PAL$primary) +
+    labs(
+      x = "Décennie", y = NULL, fill = "Nb aut.",
+      title = "Intensité des autorisations par activité et décennie",
+      subtitle = "Plus la case est foncée, plus l'activité a été autorisée dans la période"
+    ) +
+    theme_finess() +
+    theme(panel.grid = element_blank())
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### ⏱ Délai autorisation → mise en œuvre
+
+```{r p4-delai}
+renderPlotly({
+  df <- activites_clean |>
+    filter(
+      !is.na(dateautor), !is.na(datemeo),
+      datemeo >= dateautor,
+      annee_autr >= input$periode[1],
+      annee_autr <= input$periode[2]
+    ) |>
+    mutate(
+      delai_jours = as.numeric(datemeo - dateautor),
+      delai_annees = delai_jours / 365.25
+    ) |>
+    filter(delai_annees <= 10, delai_annees >= 0)
+
+  if (input$dep_tempo != "Tous") df <- df |> filter(dep == input$dep_tempo)
+  if (input$activite_timeline != "Toutes")
+    df <- df |> filter(libactivite == input$activite_timeline)
+
+  validate(need(nrow(df) > 10, "Pas assez de données pour calculer les délais."))
+
+  p <- ggplot(df, aes(x = delai_annees)) +
+    geom_histogram(fill = PAL$success, color = "white", bins = 30, alpha = .85) +
+    geom_vline(aes(xintercept = median(delai_annees)),
+               color = PAL$danger, linewidth = 1, linetype = "dashed") +
+    annotate("text",
+             x = median(df$delai_annees) + .15,
+             y = Inf, vjust = 1.5,
+             label = paste0("Médiane : ", round(median(df$delai_annees), 1), " an(s)"),
+             colour = PAL$danger, size = 3.5, hjust = 0) +
+    labs(
+      x = "Délai (années)", y = "Nombre d'autorisations",
+      title = "Distribution des délais autorisation → mise en œuvre",
+      subtitle = "Ligne rouge = médiane | Valeurs > 10 ans exclues"
+    ) +
+    theme_finess()
+
+  ggplotly(p) |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### 🔬 MEO des équipements lourds
+
+```{r p4-meo-mat}
+renderPlotly({
+  df <- materiels_clean |>
+    filter(!is.na(annee_meo),
+           annee_meo >= input$periode[1],
+           annee_meo <= input$periode[2])
+
+  if (input$dep_tempo != "Tous") df <- df |> filter(dep == input$dep_tempo)
+
+  validate(need(nrow(df) > 0, "Aucun équipement lourd sur cette période."))
+
+  df_agg <- df |> count(annee_meo, lib_eml_court, name = "n")
+
+  p <- ggplot(df_agg, aes(
+    x = annee_meo, y = n, fill = lib_eml_court,
+    text = paste0("<b>", lib_eml_court, "</b><br>",
+                  annee_meo, " : ", n, " mise(s) en œuvre")
+  )) +
+    geom_col(width = .82) +
+    scale_fill_manual(
+      values = colorRampPalette(c(PAL$accent, PAL$primary, PAL$success, PAL$warn))(
+        n_distinct(df_agg$lib_eml_court)
+      )
+    ) +
+    labs(
+      x = "Année de mise en œuvre", y = "Nb d'équipements",
+      fill = "Type", title = "Mises en œuvre annuelles des équipements lourds",
+      subtitle = "Empilés par type d'appareil"
+    ) +
+    theme_finess() +
+    theme(legend.position = "bottom")
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+# Équipements & Formations
+
+Column {.sidebar data-width=320}
+-----------------------------------------------------------------------
+
+### Filtres
+
+```{r p5-filtres}
+selectInput(
+  inputId   = "dep_equip",
+  label     = "Département",
+  choices   = dep_choices,
+  selected  = "Tous",
+  selectize = TRUE
+)
+
+choix_dis <- c("Toutes" = "Toutes",
+               setNames(
+                 disciplines_clean |> count(libde, sort = TRUE) |>
+                   filter(n >= 5) |> pull(libde),
+                 str_trunc(disciplines_clean |> count(libde, sort = TRUE) |>
+                             filter(n >= 5) |> pull(libde), 55)
+               ))
+selectInput(
+  inputId   = "filtre_discipline",
+  label     = "Discipline de formation",
+  choices   = choix_dis,
+  selected  = "Toutes",
+  selectize = TRUE
+)
+```
+
+### À propos
+
+```{r p5-info}
+HTML('
+<div class="info-card">
+  <strong>Matériels lourds</strong> — IRM, scanners, gamma-caméras, cyclotrons… recensés dans FINESS.<br><br>
+  <strong>Formations</strong> — Diplômes d\'État (DE) autorisés : aide-soignant, infirmier, sage-femme…<br><br>
+  <strong>capaut</strong> — Capacité d\'accueil autorisée (nb de places/étudiants par ligne).
+</div>
+')
+```
+
+### Indicateurs équipements
+
+```{r p5-vb-irm}
+renderValueBox({
+  dep <- input$dep_equip
+  d <- if (dep == "Tous") materiels_clean else materiels_clean |> filter(dep == !!dep)
+  n <- sum(str_detect(d$libeml, "IRM|imagerie"), na.rm = TRUE)
+  valueBox(paste0("IRM: ", n), "IRM recensées — imagerie", icon = "fa-circle-o", color = "#1a3a5c")
+})
+```
+
+```{r p5-vb-scanner}
+renderValueBox({
+  dep <- input$dep_equip
+  d <- if (dep == "Tous") materiels_clean else materiels_clean |> filter(dep == !!dep)
+  n <- sum(str_detect(d$libeml, "Scanographe"), na.rm = TRUE)
+  valueBox(paste0("Scanners: ", n), "Scanners médicaux — imagerie", icon = "fa-circle", color = "#2176ae")
+})
+```
+
+```{r p5-vb-cap-form}
+renderValueBox({
+  dep <- input$dep_equip
+  d <- if (dep == "Tous") disciplines_clean else disciplines_clean |> filter(dep == !!dep)
+  if (input$filtre_discipline != "Toutes") d <- d |> filter(libde == input$filtre_discipline)
+  n <- sum(d$capaut_n, na.rm = TRUE)
+  valueBox(paste0("Capacite: ", format(n, big.mark = "\u202f")), "Places de formation totales — capacité", icon = "fa-graduation-cap", color = "#06a77d")
+})
+```
+
+Column {.tabset}
+-----------------------------------------------------------------------
+
+### 🎓 Capacités de formation
+
+```{r p5-formations-cap}
+renderPlotly({
+  dep <- input$dep_equip
+  d   <- if (dep == "Tous") disciplines_clean else disciplines_clean |> filter(dep == !!dep)
+  if (input$filtre_discipline != "Toutes") d <- d |> filter(libde == input$filtre_discipline)
+
+  df_agg <- d |>
+    group_by(libde) |>
+    summarise(
+      cap_moy   = mean(capaut_n, na.rm = TRUE),
+      cap_total = sum(capaut_n, na.rm = TRUE),
+      n_sites   = n_distinct(nofinesset),
+      .groups = "drop"
+    ) |>
+    filter(!is.na(cap_moy), cap_moy > 0) |>
+    mutate(libde = str_trunc(libde, 50)) |>
+    slice_max(cap_total, n = 15) |>
+    mutate(libde = forcats::fct_reorder(libde, cap_total))
+
+  validate(need(nrow(df_agg) > 0, "Aucune donnée de formation."))
+
+  p <- ggplot(df_agg, aes(
+    x = libde, y = cap_total, fill = cap_moy,
+    text = paste0("<b>", libde, "</b><br>",
+                  "Capacité totale : ", format(cap_total, big.mark = "\u202f"), " places<br>",
+                  "Capacité moy/site : ", round(cap_moy, 1), "<br>",
+                  "Nb de sites : ", n_sites)
+  )) +
+    geom_col(width = .78) +
+    scale_fill_gradient(low = PAL$accent, high = PAL$primary, name = "Cap. moy./site") +
+    coord_flip() +
+    scale_y_continuous(labels = label_number(big.mark = "\u202f"),
+                       expand = expansion(mult = c(0, .12))) +
+    labs(
+      x = NULL, y = "Capacité totale autorisée (places)",
+      title = "Top 15 des disciplines par capacité de formation",
+      subtitle = "Couleur = capacité moyenne par site de formation"
+    ) +
+    theme_finess()
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### 🔗 Corrélation équipements × formations
+
+```{r p5-corr}
+renderPlotly({
+  dep_sel <- input$dep_equip
+
+  df <- dep_geo |>
+    sf::st_drop_geometry() |>
+    filter(n_mat_total > 0 | cap_total > 0) |>
+    mutate(
+      sel   = if (dep_sel != "Tous") if_else(dep == dep_sel, "Sélection", "Autres") else "Tous",
+      score_label = scales::number(score_offre, accuracy = .1)
+    )
+
+  couleurs <- c("Tous" = PAL$secondary, "Autres" = "#9ab8d4", "Sélection" = PAL$warn)
+
+  p <- ggplot(df, aes(
+    x = n_mat_total, y = cap_total, size = score_offre, color = sel,
+    text = paste0(
+      "<b>", dep, " — ", nom, "</b><br>",
+      "Matériels lourds : ", n_mat_total, "<br>",
+      "Capacité de formation : ", format(cap_total, big.mark = "\u202f"), " places<br>",
+      "Indice composite : ", score_label, "/100"
+    )
+  )) +
+    geom_point(alpha = .82) +
+    scale_color_manual(values = couleurs) +
+    scale_size_continuous(range = c(3, 16)) +
+    labs(
+      x = "Nombre de matériels lourds",
+      y = "Capacité totale de formation (places)",
+      size = "Indice offre", color = NULL,
+      title = "Corrélation équipements lourds × formations médico-sociales",
+      subtitle = "Taille des bulles = indice composite d'offre (0-100)"
+    ) +
+    theme_finess()
+
+  ggplotly(p, tooltip = "text") |>
+    layout(font = list(family = "IBM Plex Sans"))
+})
+```
+
+### 📋 Table détaillée
+
+```{r p5-table}
+renderDT({
+  df <- dep_geo |>
+    sf::st_drop_geometry() |>
+    transmute(
+      Dept.       = paste0(dep, " — ", nom),
+      Étab.       = format(n_etab_act, big.mark = "\u202f"),
+      Autorisations = format(n_autorisations, big.mark = "\u202f"),
+      Types_act.  = n_types_act,
+      Formations  = format(n_formations, big.mark = "\u202f"),
+      Cap._form.  = format(cap_total, big.mark = "\u202f"),
+      Mat._lourds = n_mat_total,
+      IRM         = n_irm,
+      Scanners    = n_scanner,
+      ETALAB_pct  = paste0(round(pct_etalab, 1), " %"),
+      Indice      = round(score_offre, 1)
+    )
+
+  datatable(
+    df,
+    rownames  = FALSE,
+    filter    = "top",
+    class     = "stripe hover compact",
+    extensions = "Buttons",
+    options   = list(
+      pageLength = 15, scrollX = TRUE, dom = "Bfrtip",
+      buttons = c("csv", "excel"),
+      columnDefs = list(list(className = "dt-center", targets = 1:10))
+    )
+  ) |>
+    formatStyle(
+      "Indice",
+      background = styleColorBar(c(0, 100), "#2176ae"),
+      backgroundSize = "100% 80%", backgroundRepeat = "no-repeat",
+      backgroundPosition = "center"
+    )
+})
+```
